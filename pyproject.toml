@@ -1,0 +1,31 @@
+[project]
+name = "abss-calendar"
+version = "0.1.0"
+description = "Sincroniza la programación de partidos de ABSS (PDF) con Google Calendar"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31",
+    "pdfplumber>=0.10",
+    "PyYAML>=6.0",
+    "google-auth>=2.29",
+    "google-auth-oauthlib>=1.2",
+    "google-api-python-client>=2.126",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+pythonpath = ["src"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = ["fetch_pdf", "parse_pdf", "sync_calendar", "main", "generar_nomina"]

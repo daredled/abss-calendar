@@ -1,0 +1,21 @@
+# Nombre del equipo tal como aparece en el PDF (nombre + categoría, ej. "MI EQUIPO 45-A")
+team_name: "MI EQUIPO 45-A"
+
+# Página donde ABSS publica los links a los PDFs de programación
+source_url: "https://abss.cl/campeonato/todo.php"
+
+# Cuántos PDFs (fechas) recientes revisar en cada corrida.
+# 1 = solo el más reciente. 2 = el más reciente + el anterior (por si hay
+# reprogramaciones que afectan la fecha previa).
+fechas_lookback: 1
+
+# ID del calendario de Google donde se van a crear los eventos.
+# Recomendado: un calendario secundario dedicado, no el principal.
+# Se obtiene en Configuración del calendario > Integrar calendario > ID de calendario.
+google_calendar_id: "REEMPLAZAR_CON_TU_CALENDAR_ID@group.calendar.google.com"
+
+# Duración estimada de cada partido en minutos.
+event_duration_minutes: 80
+
+# Zona horaria para los eventos.
+timezone: "America/Santiago"

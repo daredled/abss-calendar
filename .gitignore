@@ -1,0 +1,17 @@
+config.yaml
+credentials.json
+token.json
+state.json
+*.pdf
+_tmp_fecha.pdf
+.env
+__pycache__/
+*.pyc
+sync.log
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+uv.lock
