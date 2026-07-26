@@ -53,14 +53,14 @@ def test_build_event_body_incluye_equipos_y_categoria_en_el_titulo():
     assert "SERIE 45" in body["summary"]
 
 
-def test_build_event_body_incluye_direccion_en_location():
+def test_build_event_body_usa_solo_la_direccion_en_location():
     sync, _ = _make_sync_with_mocked_service()
     partido = _partido()
 
     body = sync._build_event_body(partido, duration_minutes=80)
 
-    assert "RECINTO DOS" in body["location"]
-    assert "CALLE DOS 200" in body["location"]
+    assert body["location"] == "CALLE DOS 200, COMUNA DOS."
+    assert "RECINTO DOS" not in body["location"]
 
 
 def test_build_event_body_sin_direccion_no_falla():

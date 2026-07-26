@@ -30,7 +30,7 @@ DATE_LINE_RE = re.compile(
     re.IGNORECASE,
 )
 
-GYM_LINE_RE = re.compile(r"^GIMNASIO\s+(.+)$")
+GYM_LINE_RE = re.compile(r"^GIMNASIO\s+(?P<gimnasio>.+?)(?:\s{3,}(?P<direccion>\S.*))?$")
 
 # Línea de partido, ej:
 # "13:00 MI EQUIPO 45-A OTRO EQUIPO 45-A SERIE 45 ARBITRO UNO ARBITRO DOS (PL) 336 14"
@@ -73,6 +73,14 @@ class Partido:
 
     def to_dict(self):
         return asdict(self)
+
+
+def _clean_direccion(direccion: Optional[str]) -> Optional[str]:
+    """Quita el punto final que el PDF agrega a algunas direcciones (no todas)
+    y que no aporta nada al usarlas como ubicación de un evento."""
+    if direccion is None:
+        return None
+    return direccion.rstrip(".")
 
 
 def _parse_date_line(line: str) -> Optional[date]:
@@ -123,11 +131,16 @@ def parse_pdf_text(text: str, team_name: str) -> list[Partido]:
             current_address = None
             continue
 
-        # ¿Línea de gimnasio?
+        # ¿Línea de gimnasio? El PDF trae el nombre del gimnasio y su
+        # dirección en columnas separadas; al extraer con layout=True quedan
+        # en la misma línea separadas por una corrida larga de espacios
+        # (columna distinta), a diferencia del espacio simple entre palabras
+        # de un mismo nombre. Si no hay esa corrida larga, puede que la
+        # dirección venga en una línea aparte (formato legacy, ver más abajo).
         gym_m = GYM_LINE_RE.match(line)
         if gym_m:
-            current_gym = gym_m.group(1).strip()
-            current_address = None
+            current_gym = gym_m.group("gimnasio").strip()
+            current_address = _clean_direccion(gym_m.group("direccion"))
             awaiting_address = False
             continue
 
@@ -175,7 +188,7 @@ def parse_pdf_text(text: str, team_name: str) -> list[Partido]:
 
         # Si llegamos aquí y estábamos esperando la dirección, esta línea lo es
         if awaiting_address:
-            current_address = line
+            current_address = _clean_direccion(line)
             awaiting_address = False
             continue
 
@@ -183,13 +196,19 @@ def parse_pdf_text(text: str, team_name: str) -> list[Partido]:
 
 
 def extract_text_from_pdf(path: str) -> str:
-    """Extrae texto de un PDF local usando pdfplumber (uso en producción)."""
+    """Extrae texto de un PDF local usando pdfplumber (uso en producción).
+
+    Usa layout=True para preservar la posición horizontal del texto: la
+    línea "GIMNASIO ..." trae el nombre del gimnasio y su dirección en
+    columnas separadas por un espacio grande, y GYM_LINE_RE necesita ese
+    espacio para distinguir dónde termina el nombre y empieza la dirección.
+    """
     import pdfplumber
 
     text_parts = []
     with pdfplumber.open(path) as pdf:
         for page in pdf.pages:
-            text_parts.append(page.extract_text() or "")
+            text_parts.append(page.extract_text(layout=True) or "")
     return "\n".join(text_parts)
 
 
@@ -202,7 +221,7 @@ def extract_text_from_pdf_bytes(content: bytes) -> str:
     text_parts = []
     with pdfplumber.open(io.BytesIO(content)) as pdf:
         for page in pdf.pages:
-            text_parts.append(page.extract_text() or "")
+            text_parts.append(page.extract_text(layout=True) or "")
     return "\n".join(text_parts)
 
 

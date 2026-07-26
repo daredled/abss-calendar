@@ -10,7 +10,7 @@ def test_equipo_con_un_solo_partido():
     assert p.fecha == "2026-07-12"
     assert p.hora == "13:00"
     assert p.gimnasio == "RECINTO DOS"
-    assert p.direccion == "CALLE DOS 200, COMUNA DOS."
+    assert p.direccion == "CALLE DOS 200, COMUNA DOS"
     assert p.equipo_local == "MI EQUIPO 45-A"
     assert p.equipo_visita == "OTRO EQUIPO 45-A"
     assert p.categoria == "SERIE 45"
@@ -66,6 +66,47 @@ def test_direccion_sin_coma_tambien_se_captura():
     partidos = parse_pdf_text(FECHA14_TEXTO, "MI EQUIPO 60-B")
     assert partidos[0].gimnasio == "RECINTO CINCO"
     assert partidos[0].direccion == "CALLE CINCO 500"
+
+
+def test_gimnasio_y_direccion_en_la_misma_linea_se_separan():
+    # Formato actual real de ABSS: al extraer con layout=True, el nombre del
+    # gimnasio y su dirección quedan en la misma línea, separados por el
+    # espacio en blanco de la columna de la tabla (mucho más largo que un
+    # espacio simple entre palabras).
+    texto = (
+        "sábado, 11 de julio de 2026\n"
+        "GIMNASIO BRISAS                                 LUCIANO ORTIZ 8450, LA CISTERNA.\n"
+        "HORA LOCAL VISITA GRUPO AGRUPACIÓN DE ARBITROS\n"
+        "09:00 MI EQUIPO 45-A OTRO EQUIPO 45-A SERIE 45 ARBITRO UNO ARBITRO DOS 3537 15\n"
+    )
+    partidos = parse_pdf_text(texto, "MI EQUIPO 45-A")
+    assert len(partidos) == 1
+    assert partidos[0].gimnasio == "BRISAS"
+    assert partidos[0].direccion == "LUCIANO ORTIZ 8450, LA CISTERNA"
+
+
+def test_gimnasio_con_nombre_compuesto_y_direccion_se_separan():
+    texto = (
+        "sábado, 11 de julio de 2026\n"
+        "GIMNASIO PRINCE OF WALES COUNTRY CLUB     LAS ARAÑAS 1901, LA REINA\n"
+        "HORA LOCAL VISITA GRUPO AGRUPACIÓN DE ARBITROS\n"
+        "09:00 MI EQUIPO 45-A OTRO EQUIPO 45-A SERIE 45 ARBITRO UNO ARBITRO DOS 3537 15\n"
+    )
+    partidos = parse_pdf_text(texto, "MI EQUIPO 45-A")
+    assert partidos[0].gimnasio == "PRINCE OF WALES COUNTRY CLUB"
+    assert partidos[0].direccion == "LAS ARAÑAS 1901, LA REINA"
+
+
+def test_gimnasio_sin_direccion_en_la_misma_linea_no_falla():
+    texto = (
+        "sábado, 11 de julio de 2026\n"
+        "GIMNASIO RECINTO UNO\n"
+        "HORA LOCAL VISITA GRUPO AGRUPACIÓN DE ARBITROS\n"
+        "09:00 MI EQUIPO 45-A OTRO EQUIPO 45-A SERIE 45 ARBITRO UNO ARBITRO DOS 3537 15\n"
+    )
+    partidos = parse_pdf_text(texto, "MI EQUIPO 45-A")
+    assert partidos[0].gimnasio == "RECINTO UNO"
+    assert partidos[0].direccion is None
 
 
 def test_split_team_category_con_nombre_compuesto():

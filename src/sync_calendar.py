@@ -50,9 +50,11 @@ class CalendarSync:
         start_dt = datetime.strptime(f"{partido['fecha']} {partido['hora']}", "%Y-%m-%d %H:%M")
         end_dt = start_dt + timedelta(minutes=duration_minutes)
 
-        location = partido["gimnasio"]
-        if partido.get("direccion"):
-            location = f"{location}, {partido['direccion']}"
+        # Solo la dirección (sin el nombre del gimnasio): así Calendar puede
+        # geocodificarla directamente, igual que si se pegara a mano en el
+        # buscador de Maps. Si no hay dirección (PDF sin ese dato), usamos
+        # el nombre del gimnasio como último recurso para no dejarlo vacío.
+        location = partido.get("direccion") or partido["gimnasio"]
 
         return {
             "summary": f"{partido['equipo_local']} vs {partido['equipo_visita']} ({partido['categoria']})",
