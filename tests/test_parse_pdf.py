@@ -1,5 +1,5 @@
 from parse_pdf import parse_pdf_text, _split_team_category, _parse_date_line
-from tests.fixtures import FECHA14_TEXTO
+from tests.fixtures import FECHA14_TEXTO, FECHA22_TEXTO
 
 
 def test_equipo_con_un_solo_partido():
@@ -147,3 +147,87 @@ def test_busqueda_es_insensible_a_mayusculas():
     partidos_mayus = parse_pdf_text(FECHA14_TEXTO, "MI EQUIPO 45-A")
     partidos_minus = parse_pdf_text(FECHA14_TEXTO, "mi equipo 45-a")
     assert {p.id_partido for p in partidos_mayus} == {p.id_partido for p in partidos_minus}
+
+
+# ---------------------------------------------------------------------------
+# Formato nuevo del PDF (jornada 22 en adelante): equipos separados por "VS",
+# árbitros en línea aparte, y sin id de partido ni cancha en la fila.
+# ---------------------------------------------------------------------------
+
+
+def test_formato_nuevo_equipo_como_visita():
+    partidos = parse_pdf_text(FECHA22_TEXTO, "MI EQUIPO 45-A", jornada="22")
+    assert len(partidos) == 1
+    p = partidos[0]
+    assert p.id_partido is None
+    assert p.cancha is None
+    assert p.fecha == "2026-09-12"
+    assert p.hora == "18:45"
+    assert p.gimnasio == "RECINTO UNO"
+    assert p.direccion == "CALLE UNO 100, COMUNA UNO"
+    assert p.equipo_local == "CLUB E 45-A"
+    assert p.equipo_visita == "MI EQUIPO 45-A"
+    assert p.categoria == "SERIE 45"
+    assert p.jornada == "22"
+
+
+def test_formato_nuevo_equipo_como_local_y_segundo_dia():
+    partidos = parse_pdf_text(FECHA22_TEXTO, "MI EQUIPO 50-A", jornada="22")
+    assert len(partidos) == 1
+    p = partidos[0]
+    assert p.fecha == "2026-09-13"  # bloque del domingo
+    assert p.hora == "10:20"
+    assert p.gimnasio == "RECINTO TRES"
+    assert p.direccion == "CALLE TRES 300"  # dirección sin coma
+    assert p.equipo_local == "MI EQUIPO 50-A"
+    assert p.equipo_visita == "CLUB M 50-A"
+
+
+def test_formato_nuevo_categoria_exacta_no_hace_match_parcial():
+    p45 = parse_pdf_text(FECHA22_TEXTO, "MI EQUIPO 45-A", jornada="22")
+    p60 = parse_pdf_text(FECHA22_TEXTO, "MI EQUIPO 60-B", jornada="22")
+    assert [p.hora for p in p45] == ["18:45"]
+    assert [p.hora for p in p60] == ["16:20"]
+
+
+def test_formato_nuevo_equipo_sin_partidos_devuelve_lista_vacia():
+    assert parse_pdf_text(FECHA22_TEXTO, "EQUIPO_QUE_NO_EXISTE 99-Z", jornada="22") == []
+
+
+def test_formato_nuevo_lee_la_jornada_del_encabezado_si_no_se_pasa():
+    partidos = parse_pdf_text(FECHA22_TEXTO, "MI EQUIPO 45-A")
+    assert partidos[0].jornada == "22"
+
+
+def test_formato_nuevo_clave_es_estable_ante_reprogramacion():
+    # Sin id de partido, la clave se deriva de jornada + categoría + equipos,
+    # así que un cambio de fecha/hora es el MISMO partido (actualización).
+    base = parse_pdf_text(FECHA22_TEXTO, "MI EQUIPO 45-A", jornada="22")[0]
+    reprogramado = FECHA22_TEXTO.replace(
+        "18:45    CLUB E 45-A           VS    MI EQUIPO 45-A",
+        "20:00    CLUB E 45-A           VS    MI EQUIPO 45-A",
+    )
+    otro = parse_pdf_text(reprogramado, "MI EQUIPO 45-A", jornada="22")[0]
+    assert otro.hora == "20:00"
+    assert otro.clave == base.clave
+    assert base.clave == "J22|SERIE 45|CLUB E 45-A|MI EQUIPO 45-A"
+
+
+def test_formato_nuevo_no_confunde_el_pie_actualizado_al_con_una_fecha():
+    # El pie "TOTAL: ... Actualizado al: lunes, 7 de septiembre de 2026" trae
+    # una fecha embebida que no es la de ningún partido.
+    partidos = parse_pdf_text(FECHA22_TEXTO, "MI EQUIPO 50-A", jornada="22")
+    assert partidos[0].fecha == "2026-09-13"
+
+
+def test_parse_date_line_formato_nuevo_mayusculas_y_texto_extra():
+    d = _parse_date_line("SÁBADO,  12 DE SEPTIEMBRE DE 2026                14 PARTIDOS")
+    assert d is not None
+    assert d.isoformat() == "2026-09-12"
+
+
+def test_parse_date_line_ignora_fecha_del_pie_actualizado():
+    # Esta sí matchea el patrón de fecha (por eso el parser la filtra por el
+    # prefijo "Actualizado"), pero _parse_date_line en sí no la reconoce
+    # porque no empieza con un día de la semana.
+    assert _parse_date_line("Actualizado al: lunes, 7 de septiembre de 2026") is None

@@ -143,8 +143,13 @@ def main():
     # También recordamos de qué PDF vino cada partido: más abajo usamos ese
     # dato para no comparar contra partidos que viven en PDFs sin cambios
     # (si no, como no fueron reparseados, parecerían haber desaparecido).
-    partidos_actuales = {}  # id_partido -> dict
-    partido_pdf = {}  # id_partido -> filename del PDF de origen
+    #
+    # La llave de cada partido es `clave` (ver parse_pdf.Partido): el id del
+    # PDF en el formato viejo, o una llave sintética jornada+categoría+equipos
+    # en el nuevo (jornada 22 en adelante), que dejó de traer id de partido.
+    partidos_actuales = {}  # clave -> dict
+    partido_pdf = {}  # clave -> filename del PDF de origen
+    pdfs_parseados = []  # PDFs de los que sí se pudo extraer texto
     for pdf in changed_pdfs:
         with open(TMP_PDF_PATH, "wb") as f:
             f.write(pdf.content)
@@ -154,19 +159,34 @@ def main():
             if os.path.exists(TMP_PDF_PATH):
                 os.remove(TMP_PDF_PATH)
 
-        partidos = parse_pdf_text(texto, config["team_name"])
+        if not texto.strip():
+            log.warning(
+                "%s no tiene capa de texto (PDF escaneado / solo imagen). "
+                "No se puede parsear: se omite y NO se guarda su hash, para "
+                "reintentar en la próxima corrida.",
+                pdf.filename,
+            )
+            continue
+
+        pdfs_parseados.append(pdf)
+        partidos = parse_pdf_text(texto, config["team_name"], jornada=str(pdf.fecha_num))
         log.info("%s: %d partido(s) de %s encontrados.", pdf.filename, len(partidos), config["team_name"])
         for p in partidos:
-            partidos_actuales[p.id_partido] = p.to_dict()
-            partido_pdf[p.id_partido] = pdf.filename
+            partidos_actuales[p.clave] = p.to_dict()
+            partido_pdf[p.clave] = pdf.filename
+
+    if not pdfs_parseados:
+        log.warning("Ninguno de los PDFs cambiados se pudo parsear. Fin.")
+        return
 
     if not partidos_actuales:
-        log.warning(
-            "No se encontraron partidos de '%s' en los PDFs cambiados. "
-            "Se actualizan los hashes pero no se toca el calendario.",
+        log.info(
+            "No se encontraron partidos de '%s' en los PDFs parseados. "
+            "Se actualizan los hashes (para no reparsearlos) pero no se toca "
+            "el calendario.",
             config["team_name"],
         )
-        for pdf in changed_pdfs:
+        for pdf in pdfs_parseados:
             state["pdf_hashes"][pdf.filename] = pdf.md5
         save_state(state)
         return
@@ -185,60 +205,60 @@ def main():
     # tienen ese dato. Si vuelven a aparecer en un PDF que se reprocesa,
     # lo completamos ahora para que no se traten como "nuevos" (duplicado)
     # más abajo.
-    for id_partido, filename in partido_pdf.items():
-        m = known_matches.get(id_partido)
+    for clave, filename in partido_pdf.items():
+        m = known_matches.get(clave)
         if m is not None and "pdf_filename" not in m:
             m["pdf_filename"] = filename
 
     # Solo los partidos cuyo PDF de origen se reprocesó en esta corrida son
-    # candidatos a "borrado". Los que viven en PDFs sin cambios quedan fuera
-    # del diff y no se tocan.
-    changed_filenames = {pdf.filename for pdf in changed_pdfs}
+    # candidatos a "borrado". Los que viven en PDFs sin cambios (o que no se
+    # pudieron parsear) quedan fuera del diff y no se tocan.
+    changed_filenames = {pdf.filename for pdf in pdfs_parseados}
     known_matches_scoped = scope_known_matches(known_matches, changed_filenames)
 
     diff = compute_diff(partidos_actuales, known_matches_scoped)
 
-    for id_partido in diff["nuevos"]:
-        partido = partidos_actuales[id_partido]
+    for clave in diff["nuevos"]:
+        partido = partidos_actuales[clave]
         # Antes de crear, nos fijamos si ya existe un evento para este
-        # id_partido en el calendario (ej. si state.json se perdió). Si ya
+        # partido en el calendario (ej. si state.json se perdió). Si ya
         # existe, lo reutilizamos y lo actualizamos en vez de duplicarlo.
-        event_id = sync.find_event_id_by_partido(id_partido)
+        event_id = sync.find_event_id_by_partido(clave)
         if event_id:
             sync.update_event(event_id, partido, duration)
             log.info("Recuperado: partido %s ya tenía evento en el calendario, no se duplicó (%s vs %s, %s %s)",
-                      id_partido, partido["equipo_local"], partido["equipo_visita"],
+                      clave, partido["equipo_local"], partido["equipo_visita"],
                       partido["fecha"], partido["hora"])
         else:
             event_id = sync.insert_event(partido, duration)
             log.info("Creado: partido %s (%s vs %s, %s %s)",
-                      id_partido, partido["equipo_local"], partido["equipo_visita"],
+                      clave, partido["equipo_local"], partido["equipo_visita"],
                       partido["fecha"], partido["hora"])
-        known_matches[id_partido] = {**partido, "event_id": event_id, "pdf_filename": partido_pdf[id_partido]}
+        known_matches[clave] = {**partido, "event_id": event_id, "pdf_filename": partido_pdf[clave]}
 
-    for id_partido in diff["actualizados"]:
-        partido_nuevo = partidos_actuales[id_partido]
-        partido_previo = known_matches[id_partido]
+    for clave in diff["actualizados"]:
+        partido_nuevo = partidos_actuales[clave]
+        partido_previo = known_matches[clave]
         event_id = partido_previo["event_id"]
         sync.update_event(event_id, partido_nuevo, duration)
-        known_matches[id_partido] = {**partido_nuevo, "event_id": event_id, "pdf_filename": partido_pdf[id_partido]}
+        known_matches[clave] = {**partido_nuevo, "event_id": event_id, "pdf_filename": partido_pdf[clave]}
         log.info("Actualizado: partido %s (nuevo horario/lugar: %s %s @ %s)",
-                  id_partido, partido_nuevo["fecha"], partido_nuevo["hora"], partido_nuevo["gimnasio"])
+                  clave, partido_nuevo["fecha"], partido_nuevo["hora"], partido_nuevo["gimnasio"])
 
-    for id_partido in diff["sin_cambios"]:
+    for clave in diff["sin_cambios"]:
         # sin cambios, igual refrescamos los datos por si acaso
-        partido_nuevo = partidos_actuales[id_partido]
-        partido_previo = known_matches[id_partido]
-        known_matches[id_partido] = {**partido_nuevo, "event_id": partido_previo["event_id"], "pdf_filename": partido_pdf[id_partido]}
+        partido_nuevo = partidos_actuales[clave]
+        partido_previo = known_matches[clave]
+        known_matches[clave] = {**partido_nuevo, "event_id": partido_previo["event_id"], "pdf_filename": partido_pdf[clave]}
 
-    for id_partido in diff["borrados"]:
-        event_id = known_matches[id_partido]["event_id"]
+    for clave in diff["borrados"]:
+        event_id = known_matches[clave]["event_id"]
         sync.delete_event(event_id)
-        log.info("Borrado: partido %s ya no aparece en la programación vigente.", id_partido)
-        del known_matches[id_partido]
+        log.info("Borrado: partido %s ya no aparece en la programación vigente.", clave)
+        del known_matches[clave]
 
     state["matches"] = known_matches
-    for pdf in changed_pdfs:
+    for pdf in pdfs_parseados:
         state["pdf_hashes"][pdf.filename] = pdf.md5
 
     save_state(state)

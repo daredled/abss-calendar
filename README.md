@@ -11,8 +11,17 @@ detectando altas, cambios de horario/gimnasio y bajas.
 2. Calcula el MD5 de cada PDF. Si no cambió respecto a la última corrida, no
    hace nada más (no llama a la API de Google).
 3. Si cambió, extrae los partidos del equipo configurado y compara contra el
-   estado anterior usando el **ID de partido** del PDF como llave estable.
+   estado anterior usando una **llave estable** por partido: el ID de partido
+   del PDF cuando lo trae (formato hasta la jornada 21), o una llave sintética
+   `jornada + categoría + equipos` cuando no (formato nuevo, jornada 22 en
+   adelante, que dejó de publicar el ID de partido y la cancha).
 4. Crea, actualiza o borra eventos en Google Calendar según corresponda.
+
+> **Nota sobre el formato del PDF:** ABSS cambió la plantilla de la
+> programación a partir de la jornada 22 (equipos separados por `VS`, árbitros
+> en línea aparte, sin ID de partido ni cancha). El parser entiende ambos
+> formatos. Si algún PDF se publica como imagen escaneada (sin capa de texto),
+> se registra un aviso y se omite sin tocar el calendario.
 
 ## Requisitos
 

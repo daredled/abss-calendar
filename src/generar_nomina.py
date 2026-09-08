@@ -53,14 +53,17 @@ def find_next_match(config: dict, now: Optional[datetime] = None) -> Optional[Pa
     if now is None:
         now = datetime.now()
 
-    partidos_por_id: dict[str, Partido] = {}
+    partidos_por_clave: dict[str, Partido] = {}
     for fecha_num, url in discover_pdf_urls(config["source_url"]):
         pdf = download_pdf(url, fecha_num)
         texto = extract_text_from_pdf_bytes(pdf.content)
-        for partido in parse_pdf_text(texto, config["team_name"]):
-            partidos_por_id[partido.id_partido] = partido
+        if not texto.strip():
+            # PDF escaneado / solo imagen: no se puede parsear, se omite.
+            continue
+        for partido in parse_pdf_text(texto, config["team_name"], jornada=str(fecha_num)):
+            partidos_por_clave[partido.clave] = partido
 
-    return pick_next_match(list(partidos_por_id.values()), now)
+    return pick_next_match(list(partidos_por_clave.values()), now)
 
 
 def _formatear_fecha_es(fecha_iso: str) -> str:

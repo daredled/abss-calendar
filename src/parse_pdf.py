@@ -24,16 +24,25 @@ MESES = {
 }
 
 # "sábado, 11 de julio de 2026" -> date(2026, 7, 11)
+# El formato nuevo (jornada 22 en adelante) trae el día en mayúsculas y con
+# texto extra al final ("SÁBADO,  12 DE SEPTIEMBRE DE 2026    14 PARTIDOS"),
+# así que toleramos cualquier cosa después del año.
 DATE_LINE_RE = re.compile(
     r"^(?:lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo),\s*"
-    r"(\d{1,2})\s+de\s+([a-záéíóúñ]+)\s+de\s+(\d{4})$",
+    r"(\d{1,2})\s+de\s+([a-záéíóúñ]+)\s+de\s+(\d{4})"
+    r"(?:\s.*)?$",
     re.IGNORECASE,
 )
 
 GYM_LINE_RE = re.compile(r"^GIMNASIO\s+(?P<gimnasio>.+?)(?:\s{3,}(?P<direccion>\S.*))?$")
 
-# Línea de partido, ej:
+# Número de jornada en el encabezado del formato nuevo:
+# "PROGRAMACIÓN                      JORNADA            22"
+JORNADA_RE = re.compile(r"\bJORNADA\s+(\d+)\b")
+
+# Línea de partido (formato viejo, hasta jornada 21), ej:
 # "13:00 MI EQUIPO 45-A OTRO EQUIPO 45-A SERIE 45 ARBITRO UNO ARBITRO DOS (PL) 336 14"
+# Trae árbitros, id de partido y cancha al final de la fila.
 MATCH_LINE_RE = re.compile(
     r"^(?P<hora>\d{2}:\d{2})\s+"
     r"(?P<local>.+?\s\d{2}-[A-Z])\s+"
@@ -45,7 +54,22 @@ MATCH_LINE_RE = re.compile(
     r"(?P<cancha>\d+)$"
 )
 
-# Líneas de encabezado / ruido a ignorar dentro de un bloque de gimnasio
+# Línea de partido (formato nuevo, jornada 22 en adelante), ej:
+# "18:45    ISB 45-A              VS    LICEO 45-A            SERIE 45"
+# Los equipos van separados por "VS" y la fila ya NO trae árbitros, ni id de
+# partido, ni cancha (esos datos desaparecieron del PDF).
+NEW_MATCH_LINE_RE = re.compile(
+    r"^(?P<hora>\d{2}:\d{2})\s+"
+    r"(?P<local>.+?\s\d{2}-[A-Z])\s+"
+    r"VS\s+"
+    r"(?P<visita>.+?\s\d{2}-[A-Z])\s+"
+    r"(?P<serie_label>SERIE|COMP)\s*(?P<serie_num>\d+)"
+    r"(?:\s.*)?$",
+    re.IGNORECASE,
+)
+
+# Líneas de encabezado / ruido a ignorar dentro de un bloque de gimnasio.
+# La comparación se hace sobre la línea con espacios colapsados a uno solo.
 IGNORE_LINE_PREFIXES = (
     "HORA LOCAL VISITA",
     "GRUPO",
@@ -55,13 +79,21 @@ IGNORE_LINE_PREFIXES = (
     "SUJETA A MODIFICACION",
     "Asociación de Basquétbol",
     "Asociacion de Basquetbol",
+    "Asociación de Básquetbol",
+    "Agrupación de árbitros",
+    "Agrupacion de arbitros",
     "Total de partidos",
+    "TOTAL:",
+    "TOTAL ",
+    "www.abss.cl",
 )
 
 
 @dataclass
 class Partido:
-    id_partido: str
+    # id_partido y cancha vienen None en el formato nuevo del PDF (jornada 22
+    # en adelante), que dejó de publicarlos.
+    id_partido: Optional[str]
     fecha: str  # YYYY-MM-DD
     hora: str   # HH:MM
     gimnasio: str
@@ -69,10 +101,29 @@ class Partido:
     equipo_local: str
     equipo_visita: str
     categoria: str
-    cancha: str
+    cancha: Optional[str]
+    jornada: Optional[str] = None
+
+    @property
+    def clave(self) -> str:
+        """Llave estable para seguir el partido entre corridas.
+
+        El formato viejo del PDF traía un 'id_partido' único y estable; el
+        formato nuevo (jornada 22 en adelante) ya no lo trae, así que
+        derivamos una llave sintética a partir de jornada + categoría +
+        equipos. Es única (un enfrentamiento por categoría por jornada) y se
+        mantiene estable aunque cambien fecha/hora/gimnasio: una
+        reprogramación es una *actualización* del mismo partido, no uno nuevo.
+        """
+        if self.id_partido:
+            return str(self.id_partido)
+        jornada = self.jornada or "SJ"
+        return f"J{jornada}|{self.categoria}|{self.equipo_local}|{self.equipo_visita}"
 
     def to_dict(self):
-        return asdict(self)
+        d = asdict(self)
+        d["clave"] = self.clave
+        return d
 
 
 def _clean_direccion(direccion: Optional[str]) -> Optional[str]:
@@ -105,10 +156,39 @@ def _split_team_category(team_with_cat: str):
     return m.group("nombre").strip(), m.group("cat").strip()
 
 
-def parse_pdf_text(text: str, team_name: str) -> list[Partido]:
+def _build_partido(m, current_date, current_gym, current_address,
+                   current_jornada, *, id_partido, cancha) -> Optional[Partido]:
+    """Construye un Partido a partir de un match de MATCH_LINE_RE o
+    NEW_MATCH_LINE_RE (comparten los grupos hora/local/visita/serie_*)."""
+    if not current_date:
+        # No debería pasar si el PDF viene bien formado
+        return None
+
+    local_nombre, local_cat = _split_team_category(m.group("local"))
+    visita_nombre, visita_cat = _split_team_category(m.group("visita"))
+
+    return Partido(
+        id_partido=id_partido,
+        fecha=current_date.isoformat(),
+        hora=m.group("hora"),
+        gimnasio=current_gym or "",
+        direccion=current_address,
+        equipo_local=f"{local_nombre} {local_cat}".strip(),
+        equipo_visita=f"{visita_nombre} {visita_cat}".strip(),
+        categoria=f"{m.group('serie_label').upper()} {m.group('serie_num')}",
+        cancha=cancha,
+        jornada=current_jornada,
+    )
+
+
+def parse_pdf_text(text: str, team_name: str,
+                   jornada: Optional[str] = None) -> list[Partido]:
     """
     text: contenido de texto ya extraído del PDF (ej. via pdfplumber .extract_text())
     team_name: ej. "MI EQUIPO 45-A"  (nombre + categoría, tal como aparece en el PDF)
+    jornada: número de jornada del PDF. El formato nuevo no trae id de partido,
+        y este dato se usa para derivar una llave estable (ver Partido.clave).
+        Si es None se intenta leer del encabezado ("... JORNADA 22").
     """
     team_name_norm = team_name.strip().upper()
 
@@ -116,6 +196,7 @@ def parse_pdf_text(text: str, team_name: str) -> list[Partido]:
     current_date: Optional[date] = None
     current_gym: Optional[str] = None
     current_address: Optional[str] = None
+    current_jornada: Optional[str] = jornada
     awaiting_address = False
 
     for raw_line in text.splitlines():
@@ -123,13 +204,25 @@ def parse_pdf_text(text: str, team_name: str) -> list[Partido]:
         if not line:
             continue
 
-        # ¿Línea de fecha?
-        d = _parse_date_line(line)
-        if d:
-            current_date = d
-            current_gym = None
-            current_address = None
-            continue
+        # Comparaciones de encabezado sobre la línea con espacios colapsados:
+        # con layout=True las columnas quedan separadas por corridas largas.
+        norm_upper = " ".join(line.split()).upper()
+
+        # Número de jornada del encabezado (solo si no vino explícito).
+        if jornada is None:
+            jm = JORNADA_RE.search(norm_upper)
+            if jm:
+                current_jornada = jm.group(1)
+
+        # ¿Línea de fecha? La del pie ("... Actualizado al: lunes, 7 de ...")
+        # trae una fecha embebida que NO es la de los partidos: la excluimos.
+        if "ACTUALIZADO" not in norm_upper:
+            d = _parse_date_line(line)
+            if d:
+                current_date = d
+                current_gym = None
+                current_address = None
+                continue
 
         # ¿Línea de gimnasio? El PDF trae el nombre del gimnasio y su
         # dirección en columnas separadas; al extraer con layout=True quedan
@@ -145,45 +238,46 @@ def parse_pdf_text(text: str, team_name: str) -> list[Partido]:
             continue
 
         # Ignorar encabezados conocidos
-        if any(line.upper().startswith(p.upper()) for p in IGNORE_LINE_PREFIXES):
-            # Justo después de "HORA LOCAL VISITA..." viene la dirección,
-            # y después "GRUPO". Marcamos que la próxima línea "libre" es dirección.
-            if line.upper().startswith("HORA LOCAL VISITA"):
+        if any(norm_upper.startswith(p.upper()) for p in IGNORE_LINE_PREFIXES):
+            # Formato legacy: el gimnasio no traía la dirección en su línea y
+            # esta venía suelta justo después de "HORA LOCAL VISITA...". Solo
+            # armamos esa espera si todavía no tenemos dirección: en el formato
+            # actual la dirección ya vino en la línea GIMNASIO y esta línea de
+            # encabezado no debe pisarla con la primera fila de partido.
+            if norm_upper.startswith("HORA LOCAL VISITA") and current_address is None:
                 awaiting_address = True
             continue
 
-        # ¿Línea de partido?
+        # ¿Línea de partido? Se prueban los dos formatos: el viejo trae id de
+        # partido y cancha al final; el nuevo separa los equipos con "VS".
         match_m = MATCH_LINE_RE.match(line)
         if match_m:
             awaiting_address = False
-            local_full = match_m.group("local")
-            visita_full = match_m.group("visita")
-            local_nombre, local_cat = _split_team_category(local_full)
-            visita_nombre, visita_cat = _split_team_category(visita_full)
-
-            local_completo = f"{local_nombre} {local_cat}".strip()
-            visita_completo = f"{visita_nombre} {visita_cat}".strip()
-
-            if team_name_norm not in (local_completo.upper(), visita_completo.upper()):
-                continue
-
-            if not current_date:
-                # No debería pasar si el PDF viene bien formado
-                continue
-
-            partidos.append(
-                Partido(
-                    id_partido=match_m.group("id_partido"),
-                    fecha=current_date.isoformat(),
-                    hora=match_m.group("hora"),
-                    gimnasio=current_gym or "",
-                    direccion=current_address,
-                    equipo_local=local_completo,
-                    equipo_visita=visita_completo,
-                    categoria=f"{match_m.group('serie_label')} {match_m.group('serie_num')}",
-                    cancha=match_m.group("cancha"),
-                )
+            partido = _build_partido(
+                match_m, current_date, current_gym, current_address,
+                current_jornada,
+                id_partido=match_m.group("id_partido"),
+                cancha=match_m.group("cancha"),
             )
+            if partido and team_name_norm in (
+                partido.equipo_local.upper(), partido.equipo_visita.upper()
+            ):
+                partidos.append(partido)
+            continue
+
+        new_m = NEW_MATCH_LINE_RE.match(line)
+        if new_m:
+            awaiting_address = False
+            partido = _build_partido(
+                new_m, current_date, current_gym, current_address,
+                current_jornada,
+                id_partido=None,
+                cancha=None,
+            )
+            if partido and team_name_norm in (
+                partido.equipo_local.upper(), partido.equipo_visita.upper()
+            ):
+                partidos.append(partido)
             continue
 
         # Si llegamos aquí y estábamos esperando la dirección, esta línea lo es

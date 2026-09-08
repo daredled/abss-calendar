@@ -56,21 +56,28 @@ class CalendarSync:
         # el nombre del gimnasio como último recurso para no dejarlo vacío.
         location = partido.get("direccion") or partido["gimnasio"]
 
+        # Identificador estable del partido: el id del PDF viejo, o la llave
+        # sintética del formato nuevo (jornada 22 en adelante, que ya no trae
+        # id de partido). Ver parse_pdf.Partido.clave.
+        clave = partido.get("clave") or partido.get("id_partido") or ""
+        cancha = partido.get("cancha") or ""
+
         return {
             "summary": f"{partido['equipo_local']} vs {partido['equipo_visita']} ({partido['categoria']})",
             "location": location,
             "description": (
-                f"Partido ABSS - ID {partido['id_partido']}\n"
-                f"Cancha: {partido.get('cancha', '')}\n"
+                f"Partido ABSS - ID {clave}\n"
+                f"Cancha: {cancha}\n"
                 f"Categoría: {partido['categoria']}"
             ),
             "start": {"dateTime": start_dt.isoformat(), "timeZone": self.timezone},
             "end": {"dateTime": end_dt.isoformat(), "timeZone": self.timezone},
-            # Guardamos el id_partido en el propio evento (no solo en
-            # state.json) para poder recuperarlo con find_event_id_by_partido
-            # si state.json se pierde, y así no crear duplicados.
+            # Guardamos la clave en el propio evento (no solo en state.json)
+            # para poder recuperarlo con find_event_id_by_partido si state.json
+            # se pierde, y así no crear duplicados. La propiedad se sigue
+            # llamando "id_partido" por compatibilidad con eventos ya creados.
             "extendedProperties": {
-                "private": {"id_partido": str(partido["id_partido"])},
+                "private": {"id_partido": str(clave)},
             },
         }
 
