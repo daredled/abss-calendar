@@ -135,30 +135,33 @@ uv run pytest
 
 ## Automatización con cron
 
+El repo incluye `sync.sh`, un wrapper mínimo para cron: se ubica solo en la
+raíz del repo y arma el `PATH` para encontrar `uv` (cron corre con un `PATH`
+mínimo y no carga tu `.bashrc`/`.zshrc`). El log lo maneja el crontab.
+
 ```bash
 crontab -e
 ```
 
-Agregar:
+Agregar (cada hora, en punto):
 
 ```
-0 * * * * cd /ruta/completa/abss-calendar && /ruta/a/uv run src/main.py >> sync.log 2>&1
+0 * * * * /ruta/completa/abss-calendar/sync.sh >> /ruta/completa/abss-calendar/sync.log 2>&1
 ```
 
-(`uv run` detecta y usa automáticamente el `.venv/` del proyecto, así que no
-hace falta activarlo ni apuntar directo al intérprete de Python).
+Cualquier argumento extra se pasa tal cual a `src/main.py` (ej.
+`sync.sh --nomina`).
 
-> **Nota:** cron corre con un `PATH` mínimo y no carga tu `.bashrc`/`.zshrc`,
-> así que `uv` puede no encontrarse por nombre. Usa la ruta completa al
-> binario (`which uv` te la muestra, típicamente `~/.local/bin/uv` o
-> `~/.cargo/bin/uv`).
+> **Nota:** si `uv` no está en `~/.local/bin` ni `~/.cargo/bin`, agrega su
+> carpeta al bucle de `PATH` en `sync.sh` o asegúrate de que `uv` esté en el
+> `PATH` del entorno de cron.
 
 ## Archivos generados / propios de cada instalación (no se suben a git)
 
 - `config.yaml` — tu configuración (equipo, calendario, etc.), a partir de `config.yaml.example`.
 - `token.json` — credenciales OAuth ya autorizadas.
 - `state.json` — hashes de PDFs procesados y estado de partidos sincronizados.
-- `sync.log` — log de cada corrida.
+- `sync.log` — log de cada corrida (redirigido desde el crontab).
 
 Si clonas este repo en otra máquina o para otro equipo, cada instalación
 genera su propio `config.yaml`, `state.json` y `token.json` la primera vez
