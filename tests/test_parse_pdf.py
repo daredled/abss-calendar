@@ -1,5 +1,5 @@
-from parse_pdf import parse_pdf_text, _split_team_category, _parse_date_line
-from tests.fixtures import FECHA14_TEXTO, FECHA22_TEXTO
+from parse_pdf import _parse_date_line, _split_team_category, parse_pdf_text
+from tests.fixtures import FECHA14_TEXTO, FECHA22_TEXTO, FECHA22_V3_TEXTO
 
 
 def test_equipo_con_un_solo_partido():
@@ -231,3 +231,70 @@ def test_parse_date_line_ignora_fecha_del_pie_actualizado():
     # prefijo "Actualizado"), pero _parse_date_line en sí no la reconoce
     # porque no empieza con un día de la semana.
     assert _parse_date_line("Actualizado al: lunes, 7 de septiembre de 2026") is None
+
+
+# ---------------------------------------------------------------------------
+# Formato real de ABSS a partir de jornada 22: grilla de DOS columnas por
+# página (dos partidos/gimnasios concatenados en una misma línea de texto),
+# gimnasio como "▣ GIMNASIO X Árbitros:", dirección en línea aparte con "●"
+# (no se repite si el gimnasio ya salió antes), sin "VS", y encabezados con
+# cada carácter duplicado/triplicado (falsa negrita).
+# ---------------------------------------------------------------------------
+
+
+def test_formato_real_dos_columnas_toma_el_partido_de_la_columna_derecha():
+    # MI EQUIPO 60-B juega en la fila del sábado, columna derecha (bajo
+    # GIMNASIO RECINTO DOS), concatenado en la misma línea que el partido de
+    # la columna izquierda.
+    partidos = parse_pdf_text(FECHA22_V3_TEXTO, "MI EQUIPO 60-B")
+    assert len(partidos) == 1
+    p = partidos[0]
+    assert p.id_partido is None
+    assert p.cancha is None
+    assert p.fecha == "2026-09-12"
+    assert p.hora == "16:20"
+    assert p.gimnasio == "RECINTO DOS"
+    assert p.equipo_local == "MI EQUIPO 60-B"
+    assert p.equipo_visita == "CLUB H 60-A"
+    assert p.categoria == "SERIE 60"
+    assert p.jornada == "22"
+
+
+def test_formato_real_dos_columnas_toma_el_partido_de_la_columna_izquierda():
+    # MI EQUIPO 45-A juega solo (sin partido en la columna derecha esa fila),
+    # bajo GIMNASIO RECINTO UNO.
+    partidos = parse_pdf_text(FECHA22_V3_TEXTO, "MI EQUIPO 45-A")
+    assert len(partidos) == 1
+    p = partidos[0]
+    assert p.fecha == "2026-09-12"
+    assert p.hora == "18:45"
+    assert p.gimnasio == "RECINTO UNO"
+    assert p.equipo_local == "CLUB E 45-A"
+    assert p.equipo_visita == "MI EQUIPO 45-A"
+
+
+def test_formato_real_reutiliza_la_direccion_de_un_gimnasio_ya_mencionado():
+    # GIMNASIO RECINTO UNO reaparece el domingo (columna derecha) sin traer
+    # dirección de nuevo: se reutiliza la del sábado.
+    partidos = parse_pdf_text(FECHA22_V3_TEXTO, "CLUB I 35-A")
+    assert len(partidos) == 1
+    p = partidos[0]
+    assert p.fecha == "2026-09-13"
+    assert p.gimnasio == "RECINTO UNO"
+    assert p.direccion == "CALLE UNO 100, COMUNA UNO. ARBITRO"
+
+
+def test_formato_real_lee_la_jornada_del_encabezado_triplicado():
+    # El título "JORNADA 22" viene con cada carácter triplicado.
+    partidos = parse_pdf_text(FECHA22_V3_TEXTO, "MI EQUIPO 45-A")
+    assert partidos[0].jornada == "22"
+
+
+def test_formato_real_fecha_duplicada_se_reconoce():
+    partidos = parse_pdf_text(FECHA22_V3_TEXTO, "MI EQUIPO 50-A", jornada="22")
+    assert partidos[0].fecha == "2026-09-13"  # domingo
+
+
+def test_formato_real_no_confunde_el_pie_actualizado_al_con_una_fecha():
+    partidos = parse_pdf_text(FECHA22_V3_TEXTO, "MI EQUIPO 50-A", jornada="22")
+    assert partidos[0].fecha == "2026-09-13"

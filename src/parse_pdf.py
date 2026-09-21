@@ -12,10 +12,8 @@ archivo descargado.
 """
 
 import re
+from dataclasses import asdict, dataclass
 from datetime import date
-from dataclasses import dataclass, asdict
-from typing import Optional
-
 
 MESES = {
     "enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
@@ -54,19 +52,42 @@ MATCH_LINE_RE = re.compile(
     r"(?P<cancha>\d+)$"
 )
 
-# Línea de partido (formato nuevo, jornada 22 en adelante), ej:
-# "18:45    ISB 45-A              VS    LICEO 45-A            SERIE 45"
-# Los equipos van separados por "VS" y la fila ya NO trae árbitros, ni id de
-# partido, ni cancha (esos datos desaparecieron del PDF).
+# Línea de partido (formato nuevo, jornada 22 en adelante). El PDF real pasó a
+# una grilla de DOS columnas por página (dos gimnasios/partidos por fila
+# física), así que dos partidos suelen terminar concatenados en una misma
+# línea de texto extraído, ej:
+#   "15:15 MADECO 50-A J.RAMSAY 50-A Serie 50 G2 (8vo_16avo) 15:15 LICEO 60-A BRISAS 60-A Serie 60 G2 (6to_10mo)"
+# Ya no trae "VS" entre equipos (se tolera igual, por si aparece), ni
+# árbitros/id/cancha en la fila. Sin anclas de inicio/fin: se usa con
+# finditer() para encontrar todas las ocurrencias de la fila (una por
+# columna) en lugar de un solo match por línea.
 NEW_MATCH_LINE_RE = re.compile(
-    r"^(?P<hora>\d{2}:\d{2})\s+"
+    r"(?P<hora>\d{2}:\d{2})\s+"
     r"(?P<local>.+?\s\d{2}-[A-Z])\s+"
-    r"VS\s+"
+    r"(?:VS\s+)?"
     r"(?P<visita>.+?\s\d{2}-[A-Z])\s+"
-    r"(?P<serie_label>SERIE|COMP)\s*(?P<serie_num>\d+)"
-    r"(?:\s.*)?$",
+    r"(?P<serie_label>SERIE|COMP)\s*(?P<serie_num>\d+)",
     re.IGNORECASE,
 )
+
+# Línea de gimnasio del formato nuevo, ej (dos columnas concatenadas):
+#   "▣ GIMNASIO ESC.LO FRANCO Árbitros:      ▣ GIMNASIO ESC.REPUBLICA DEL Árbitros:"
+# El nombre del gimnasio va seguido de la etiqueta "Árbitros:"; la dirección
+# ya NO viene en esta línea (ver NEW_ADDRESS_LINE_RE). finditer() saca los
+# gimnasios de ambas columnas, en orden.
+NEW_GYM_LINE_RE = re.compile(
+    r"▣\s*GIMNASIO\s+(?P<gimnasio>.+?)\s+Árbitros:",
+    re.IGNORECASE,
+)
+
+# Línea de dirección del formato nuevo, ej (dos columnas concatenadas):
+#   "● CIUDAD DE MEXICO 1589, LA PINTANA. SÁNCHEZ ● SAN NICOLAS 681, SAN MIGUEL. SÁNCHEZ"
+# Cada dirección viene precedida de "●"; a veces trae texto residual pegado
+# al final (apellido de árbitro que se desbordó desde la columna vecina) que
+# no logramos separar de forma confiable, así que puede quedar en el texto.
+# Un gimnasio ya mencionado antes en el PDF no repite su dirección (se
+# reutiliza la última conocida, ver `known_addresses_new` en parse_pdf_text).
+NEW_ADDRESS_LINE_RE = re.compile(r"●\s*(?P<direccion>.+?)(?=\s*●|$)")
 
 # Líneas de encabezado / ruido a ignorar dentro de un bloque de gimnasio.
 # La comparación se hace sobre la línea con espacios colapsados a uno solo.
@@ -93,16 +114,16 @@ IGNORE_LINE_PREFIXES = (
 class Partido:
     # id_partido y cancha vienen None en el formato nuevo del PDF (jornada 22
     # en adelante), que dejó de publicarlos.
-    id_partido: Optional[str]
+    id_partido: str | None
     fecha: str  # YYYY-MM-DD
     hora: str   # HH:MM
     gimnasio: str
-    direccion: Optional[str]
+    direccion: str | None
     equipo_local: str
     equipo_visita: str
     categoria: str
-    cancha: Optional[str]
-    jornada: Optional[str] = None
+    cancha: str | None
+    jornada: str | None = None
 
     @property
     def clave(self) -> str:
@@ -126,7 +147,7 @@ class Partido:
         return d
 
 
-def _clean_direccion(direccion: Optional[str]) -> Optional[str]:
+def _clean_direccion(direccion: str | None) -> str | None:
     """Quita el punto final que el PDF agrega a algunas direcciones (no todas)
     y que no aporta nada al usarlas como ubicación de un evento."""
     if direccion is None:
@@ -134,8 +155,34 @@ def _clean_direccion(direccion: Optional[str]) -> Optional[str]:
     return direccion.rstrip(".")
 
 
-def _parse_date_line(line: str) -> Optional[date]:
-    m = DATE_LINE_RE.match(line.strip())
+def _undouble_token(token: str, stride: int) -> str:
+    """Revierte el "negrita falsa" del PDF nuevo: cada carácter del título y
+    de los encabezados de fecha viene dibujado `stride` veces superpuesto,
+    así que pdfplumber lo extrae literalmente repetido (ej. "SSÁÁBBAADDOO,,"
+    en vez de "SÁBADO,"). Solo colapsamos si el token se puede dividir en
+    grupos de `stride` caracteres IDÉNTICOS entre sí: así "1133" (día 13
+    duplicado) da "13", pero un "11" o "22" genuino (no duplicado) no se
+    toca porque no hay contexto que indique que ESE token está duplicado."""
+    n = len(token)
+    if stride < 2 or n == 0 or n % stride != 0:
+        return token
+    grupos = [token[i:i + stride] for i in range(0, n, stride)]
+    if all(len(set(g)) == 1 for g in grupos):
+        return token[0::stride]
+    return token
+
+
+def _undouble_line(line: str, stride: int) -> str:
+    return " ".join(_undouble_token(tok, stride) for tok in line.split())
+
+
+def _parse_date_line(line: str) -> date | None:
+    stripped = line.strip()
+    m = DATE_LINE_RE.match(stripped)
+    if not m:
+        # Formato nuevo: el encabezado de fecha viene con cada carácter
+        # duplicado (ver _undouble_token).
+        m = DATE_LINE_RE.match(_undouble_line(stripped, 2))
     if not m:
         return None
     dia, mes_nombre, anio = m.groups()
@@ -157,7 +204,7 @@ def _split_team_category(team_with_cat: str):
 
 
 def _build_partido(m, current_date, current_gym, current_address,
-                   current_jornada, *, id_partido, cancha) -> Optional[Partido]:
+                   current_jornada, *, id_partido, cancha) -> Partido | None:
     """Construye un Partido a partir de un match de MATCH_LINE_RE o
     NEW_MATCH_LINE_RE (comparten los grupos hora/local/visita/serie_*)."""
     if not current_date:
@@ -182,7 +229,7 @@ def _build_partido(m, current_date, current_gym, current_address,
 
 
 def parse_pdf_text(text: str, team_name: str,
-                   jornada: Optional[str] = None) -> list[Partido]:
+                   jornada: str | None = None) -> list[Partido]:
     """
     text: contenido de texto ya extraído del PDF (ej. via pdfplumber .extract_text())
     team_name: ej. "MI EQUIPO 45-A"  (nombre + categoría, tal como aparece en el PDF)
@@ -193,11 +240,40 @@ def parse_pdf_text(text: str, team_name: str,
     team_name_norm = team_name.strip().upper()
 
     partidos = []
-    current_date: Optional[date] = None
-    current_gym: Optional[str] = None
-    current_address: Optional[str] = None
-    current_jornada: Optional[str] = jornada
+    current_date: date | None = None
+    current_jornada: str | None = jornada
     awaiting_address = False
+
+    # Gimnasio "actual" de cada columna, por posición (índice 0, 1, ...). El
+    # formato viejo (hasta jornada 21) es de una sola columna, así que esta
+    # lista nunca pasa de largo 1; el formato nuevo (jornada 22 en adelante)
+    # viene en grilla de dos columnas por página y dos partidos/gimnasios
+    # suelen terminar concatenados en una misma línea de texto extraído (ver
+    # NEW_MATCH_LINE_RE), así que el primero encontrado en la línea es de la
+    # columna 0, el segundo de la columna 1, etc.
+    current_gyms: list[str] = []
+    # Dirección conocida por NOMBRE de gimnasio (no por columna): un mismo
+    # gimnasio reaparece en varias filas/columnas y el PDF solo imprime su
+    # dirección la primera vez, así que hay que recordarla.
+    known_addresses: dict[str, str] = {}
+
+    def gimnasio_y_direccion(columna: int):
+        if not current_gyms:
+            return None, None
+        gym = current_gyms[columna] if columna < len(current_gyms) else current_gyms[-1]
+        return gym, known_addresses.get(gym)
+
+    def agregar_partidos(matches, id_partido_de, cancha_de):
+        for i, m in enumerate(matches):
+            gym, direccion = gimnasio_y_direccion(i)
+            partido = _build_partido(
+                m, current_date, gym, direccion, current_jornada,
+                id_partido=id_partido_de(m), cancha=cancha_de(m),
+            )
+            if partido and team_name_norm in (
+                partido.equipo_local.upper(), partido.equipo_visita.upper()
+            ):
+                partidos.append(partido)
 
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -208,9 +284,11 @@ def parse_pdf_text(text: str, team_name: str,
         # con layout=True las columnas quedan separadas por corridas largas.
         norm_upper = " ".join(line.split()).upper()
 
-        # Número de jornada del encabezado (solo si no vino explícito).
-        if jornada is None:
-            jm = JORNADA_RE.search(norm_upper)
+        # Número de jornada del encabezado (solo si no vino explícito). En el
+        # formato nuevo el título viene con cada carácter triplicado (falsa
+        # negrita), ver _undouble_token.
+        if jornada is None and current_jornada is None:
+            jm = JORNADA_RE.search(norm_upper) or JORNADA_RE.search(_undouble_line(norm_upper, 3))
             if jm:
                 current_jornada = jm.group(1)
 
@@ -220,21 +298,44 @@ def parse_pdf_text(text: str, team_name: str,
             d = _parse_date_line(line)
             if d:
                 current_date = d
-                current_gym = None
-                current_address = None
+                current_gyms = []
+                awaiting_address = False
                 continue
 
-        # ¿Línea de gimnasio? El PDF trae el nombre del gimnasio y su
-        # dirección en columnas separadas; al extraer con layout=True quedan
-        # en la misma línea separadas por una corrida larga de espacios
-        # (columna distinta), a diferencia del espacio simple entre palabras
-        # de un mismo nombre. Si no hay esa corrida larga, puede que la
-        # dirección venga en una línea aparte (formato legacy, ver más abajo).
+        # ¿Línea de gimnasio, formato viejo? Trae nombre y dirección en la
+        # misma línea, separados por una corrida larga de espacios (columna
+        # distinta al extraer con layout=True). Si no hay esa corrida larga,
+        # puede que la dirección venga en una línea aparte (formato legacy,
+        # ver más abajo).
         gym_m = GYM_LINE_RE.match(line)
         if gym_m:
-            current_gym = gym_m.group("gimnasio").strip()
-            current_address = _clean_direccion(gym_m.group("direccion"))
+            gimnasio = gym_m.group("gimnasio").strip()
+            current_gyms = [gimnasio]
+            direccion = _clean_direccion(gym_m.group("direccion"))
+            if direccion:
+                known_addresses[gimnasio] = direccion
             awaiting_address = False
+            continue
+
+        # ¿Línea de gimnasio(s), formato nuevo? "▣ GIMNASIO X Árbitros: ▣
+        # GIMNASIO Y Árbitros:" (una o dos ocurrencias, según cuántas
+        # columnas traiga esa fila). La dirección no viene aquí.
+        new_gym_matches = list(NEW_GYM_LINE_RE.finditer(line))
+        if new_gym_matches:
+            current_gyms = [gm.group("gimnasio").strip() for gm in new_gym_matches]
+            continue
+
+        # ¿Línea de dirección, formato nuevo? "● dirección ● dirección". Se
+        # asocia por posición con el gimnasio de esa misma columna: si esa
+        # columna no trae dirección en esta fila (gimnasio ya mencionado
+        # antes), se conserva la última conocida.
+        new_address_matches = list(NEW_ADDRESS_LINE_RE.finditer(line))
+        if new_address_matches:
+            for i, am in enumerate(new_address_matches):
+                if i < len(current_gyms):
+                    known_addresses[current_gyms[i]] = _clean_direccion(
+                        am.group("direccion").strip()
+                    )
             continue
 
         # Ignorar encabezados conocidos
@@ -244,45 +345,37 @@ def parse_pdf_text(text: str, team_name: str,
             # armamos esa espera si todavía no tenemos dirección: en el formato
             # actual la dirección ya vino en la línea GIMNASIO y esta línea de
             # encabezado no debe pisarla con la primera fila de partido.
-            if norm_upper.startswith("HORA LOCAL VISITA") and current_address is None:
+            if norm_upper.startswith("HORA LOCAL VISITA") and not (
+                current_gyms and known_addresses.get(current_gyms[0])
+            ):
                 awaiting_address = True
             continue
 
-        # ¿Línea de partido? Se prueban los dos formatos: el viejo trae id de
-        # partido y cancha al final; el nuevo separa los equipos con "VS".
+        # ¿Línea de partido, formato viejo? Trae id de partido y cancha al
+        # final de la fila; se prueba primero porque su ancla de cierre
+        # (`\d+\s+\d+$`) es más estricta y así no se confunde con el nuevo.
         match_m = MATCH_LINE_RE.match(line)
         if match_m:
             awaiting_address = False
-            partido = _build_partido(
-                match_m, current_date, current_gym, current_address,
-                current_jornada,
-                id_partido=match_m.group("id_partido"),
-                cancha=match_m.group("cancha"),
+            agregar_partidos(
+                [match_m],
+                id_partido_de=lambda m: m.group("id_partido"),
+                cancha_de=lambda m: m.group("cancha"),
             )
-            if partido and team_name_norm in (
-                partido.equipo_local.upper(), partido.equipo_visita.upper()
-            ):
-                partidos.append(partido)
             continue
 
-        new_m = NEW_MATCH_LINE_RE.match(line)
-        if new_m:
+        # ¿Línea de partido(s), formato nuevo? Puede traer más de un partido
+        # concatenado (uno por columna); finditer() los saca todos en orden y
+        # cada uno se asocia con el gimnasio de su misma columna.
+        new_matches = list(NEW_MATCH_LINE_RE.finditer(line))
+        if new_matches:
             awaiting_address = False
-            partido = _build_partido(
-                new_m, current_date, current_gym, current_address,
-                current_jornada,
-                id_partido=None,
-                cancha=None,
-            )
-            if partido and team_name_norm in (
-                partido.equipo_local.upper(), partido.equipo_visita.upper()
-            ):
-                partidos.append(partido)
+            agregar_partidos(new_matches, id_partido_de=lambda m: None, cancha_de=lambda m: None)
             continue
 
         # Si llegamos aquí y estábamos esperando la dirección, esta línea lo es
-        if awaiting_address:
-            current_address = _clean_direccion(line)
+        if awaiting_address and current_gyms:
+            known_addresses[current_gyms[0]] = _clean_direccion(line)
             awaiting_address = False
             continue
 
@@ -310,6 +403,7 @@ def extract_text_from_pdf_bytes(content: bytes) -> str:
     """Igual que extract_text_from_pdf, pero desde bytes ya en memoria (sin
     necesidad de escribir un archivo temporal por PDF)."""
     import io
+
     import pdfplumber
 
     text_parts = []
@@ -320,8 +414,8 @@ def extract_text_from_pdf_bytes(content: bytes) -> str:
 
 
 if __name__ == "__main__":
-    import sys
     import json
+    import sys
 
     if len(sys.argv) < 3:
         print("Uso: python parse_pdf.py <archivo.txt|archivo.pdf> <NOMBRE_EQUIPO>")
