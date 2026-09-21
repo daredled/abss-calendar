@@ -1,15 +1,15 @@
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import requests
+
 from fetch_pdf import (
+    LINK_RE,
+    MAX_RETRIES,
+    _get_with_retries,
     discover_pdf_urls,
     download_pdf,
     get_latest_pdfs,
-    LINK_RE,
-    _get_with_retries,
-    MAX_RETRIES,
 )
-
 
 SAMPLE_HTML = """
 <ul>

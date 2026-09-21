@@ -22,6 +22,12 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 pythonpath = ["src"]
 
+[tool.ruff.lint]
+# DTZ (flake8-datetimez) pide datetimes tz-aware en todos lados, pero esta app
+# trabaja a propósito en hora local naive (coincide con la hora impresa en el
+# PDF de ABSS); Google Calendar recibe la zona horaria aparte, como config.
+ignore = ["DTZ"]
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"

@@ -1,13 +1,13 @@
 from datetime import datetime
 from unittest.mock import patch
 
-from parse_pdf import Partido
 from generar_nomina import (
-    pick_next_match,
+    _formatear_fecha_es,
     find_next_match,
     generar_nomina,
-    _formatear_fecha_es,
+    pick_next_match,
 )
+from parse_pdf import Partido
 from tests.fixtures import FECHA14_TEXTO
 
 

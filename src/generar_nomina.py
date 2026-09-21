@@ -13,7 +13,6 @@ También se puede invocar desde main.py con el flag --nomina.
 import os
 import sys
 from datetime import datetime, timedelta
-from typing import Optional
 
 import yaml
 
@@ -35,7 +34,7 @@ def load_config() -> dict:
         return yaml.safe_load(f)
 
 
-def pick_next_match(partidos: list[Partido], now: datetime) -> Optional[Partido]:
+def pick_next_match(partidos: list[Partido], now: datetime) -> Partido | None:
     """Función pura: de una lista de partidos, devuelve el de fecha/hora más
     próxima que todavía no ha ocurrido (>= now). None si no hay ninguno."""
     futuros = [
@@ -47,7 +46,7 @@ def pick_next_match(partidos: list[Partido], now: datetime) -> Optional[Partido]
     return min(futuros, key=lambda p: (p.fecha, p.hora))
 
 
-def find_next_match(config: dict, now: Optional[datetime] = None) -> Optional[Partido]:
+def find_next_match(config: dict, now: datetime | None = None) -> Partido | None:
     """Descubre todos los PDFs vigentes, junta los partidos del equipo
     configurado, y devuelve el próximo (fecha/hora >= now)."""
     if now is None:

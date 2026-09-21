@@ -113,6 +113,6 @@ class CalendarSync:
             self.service.events().delete(
                 calendarId=self.calendar_id, eventId=event_id
             ).execute()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - cualquier falla al borrar es solo un aviso
             # Si el evento ya no existe (ej. borrado manual), no es un error fatal
             print(f"  [aviso] no se pudo borrar el evento {event_id}: {e}")
