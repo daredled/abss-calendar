@@ -1,4 +1,11 @@
-from parse_pdf import _parse_date_line, _split_team_category, parse_pdf_text
+import pytest
+
+from parse_pdf import (
+    _clean_direccion,
+    _parse_date_line,
+    _split_team_category,
+    parse_pdf_text,
+)
 from tests.fixtures import FECHA14_TEXTO, FECHA22_TEXTO, FECHA22_V3_TEXTO
 
 
@@ -281,7 +288,7 @@ def test_formato_real_reutiliza_la_direccion_de_un_gimnasio_ya_mencionado():
     p = partidos[0]
     assert p.fecha == "2026-09-13"
     assert p.gimnasio == "RECINTO UNO"
-    assert p.direccion == "CALLE UNO 100, COMUNA UNO. ARBITRO"
+    assert p.direccion == "CALLE UNO 100, COMUNA UNO"
 
 
 def test_formato_real_lee_la_jornada_del_encabezado_triplicado():
@@ -298,3 +305,71 @@ def test_formato_real_fecha_duplicada_se_reconoce():
 def test_formato_real_no_confunde_el_pie_actualizado_al_con_una_fecha():
     partidos = parse_pdf_text(FECHA22_V3_TEXTO, "MI EQUIPO 50-A", jornada="22")
     assert partidos[0].fecha == "2026-09-13"
+
+
+# ---------------------------------------------------------------------------
+# Direcciones del formato real: texto de la columna de árbitros pegado al
+# final, y direcciones que no vienen en el mismo orden/línea que los
+# gimnasios. Casos sacados de los PDFs reales de las jornadas 22 a 24.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "texto, esperado",
+    [
+        ("SANTA LUISA 300, QUILICURA. SÁNCHEZ", "SANTA LUISA 300, QUILICURA"),
+        ("MARIA MONVEL 50, LA REINA SÁNCHEZ", "MARIA MONVEL 50, LA REINA"),
+        ("SERGIO CEPPI Nº 0157, LA CISTERNA. ZUÑIGA (PL)", "SERGIO CEPPI Nº 0157, LA CISTERNA"),
+        (
+            "SAN NICOLAS 681, SAN MIGUEL. E S D ÁN IT C H H G E O Z NZALEZ / JESSICA",
+            "SAN NICOLAS 681, SAN MIGUEL",
+        ),
+        ("AV. RECOLETA 480, RECOLETA", "AV. RECOLETA 480, RECOLETA"),
+        ("CALLE X 1, MAIPÚ.", "CALLE X 1, MAIPÚ"),
+        # Comuna desconocida: se corta en el primer ". " tras la última coma.
+        ("CALLE UNO 100, COMUNA UNO. ARBITRO", "CALLE UNO 100, COMUNA UNO"),
+        # Sin coma no hay cómo saber dónde termina: queda tal cual.
+        ("CALLE TRES 300 ARBITRO", "CALLE TRES 300 ARBITRO"),
+    ],
+)
+def test_clean_direccion_corta_el_texto_residual(texto, esperado):
+    assert _clean_direccion(texto) == esperado
+
+
+_REAL_DIRECCIONES_LINEAS = [
+    "      SSÁÁBBAADDOO,, 2266 DDEE SSEEPPTTIIEEMMBBRREE DDEE 22002266",
+    # Dirección izquierda con residuo; la derecha viene sola en la línea siguiente.
+    "    ▣ GIMNASIO ESC.LO FRANCO Árbitros:      ▣ GIMNASIO ESC.REPUBLICA DEL Árbitros:  ",
+    "     ● AYUNTAMIENT0 2192, QUINTA NORMAL. V ZU E Ñ R I Ó G N A I C (P A L Z ) UÑIGA",
+    "                                             ● AV. RECOLETA 480, RECOLETA           ",
+    "   HORA    LOCAL      VISITA   SERIE - GRUPO HORA LOCAL      VISITA    SERIE - GRUPO",
+    "    09:00 CLUB A 45-A CLUB B 45-A Serie 45 G1 09:00 CLUB C 45-A CLUB D 45-A Serie 45 G1",
+    # Solo la columna derecha trae dirección, precedida del resto del nombre
+    # del gimnasio izquierdo, que no cupo en su línea.
+    "    ▣ GIMNASIO ESC.REPUBLICA DEL Árbitros:  ▣ GIMNASIO LA PINTANA    Árbitros:      ",
+    (
+        "   PARAGUAY                  V ZU E Ñ R I Ó G N A I C (P A L Z ) UÑIGA / VERÓNICA "
+        "● CIUDAD DE MEXICO 1589, LA PINTANA. E S D ÁN IT C H H G E O Z NZALEZ / JESSICA"
+    ),
+    "   HORA    LOCAL      VISITA   SERIE - GRUPO HORA LOCAL      VISITA    SERIE - GRUPO",
+    "    11:00 CLUB E 45-A CLUB F 45-A Serie 45 G1 11:00 CLUB G 45-A CLUB H 45-A Serie 45 G1",
+]
+REAL_DIRECCIONES_TEXTO = "\n".join(_REAL_DIRECCIONES_LINEAS)
+
+
+@pytest.mark.parametrize(
+    "equipo, gimnasio, direccion",
+    [
+        ("CLUB A 45-A", "ESC.LO FRANCO", "AYUNTAMIENT0 2192, QUINTA NORMAL"),
+        ("CLUB C 45-A", "ESC.REPUBLICA DEL", "AV. RECOLETA 480, RECOLETA"),
+        ("CLUB E 45-A", "ESC.REPUBLICA DEL", "AV. RECOLETA 480, RECOLETA"),
+        ("CLUB G 45-A", "LA PINTANA", "CIUDAD DE MEXICO 1589, LA PINTANA"),
+    ],
+)
+def test_formato_real_asocia_cada_direccion_con_el_gimnasio_de_su_columna(
+    equipo, gimnasio, direccion
+):
+    partidos = parse_pdf_text(REAL_DIRECCIONES_TEXTO, equipo, jornada="23")
+    assert len(partidos) == 1
+    assert partidos[0].gimnasio == gimnasio
+    assert partidos[0].direccion == direccion

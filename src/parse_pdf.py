@@ -147,11 +147,61 @@ class Partido:
         return d
 
 
+# Comunas de la Región Metropolitana, sin tildes (se comparan contra la
+# dirección también sin tildes). Sirven para saber dónde termina la dirección
+# en el formato nuevo, donde al final suele venir pegado texto de la columna de
+# árbitros ("SANTA LUISA 300, QUILICURA. SÁNCHEZ",
+# "MARIA MONVEL 50, LA REINA ZUÑIGA (PL)").
+COMUNAS_RM = sorted(
+    (
+        "SANTIAGO", "CERRILLOS", "CERRO NAVIA", "CONCHALI", "EL BOSQUE",
+        "ESTACION CENTRAL", "HUECHURABA", "INDEPENDENCIA", "LA CISTERNA",
+        "LA FLORIDA", "LA GRANJA", "LA PINTANA", "LA REINA", "LAS CONDES",
+        "LO BARNECHEA", "LO ESPEJO", "LO PRADO", "MACUL", "MAIPU", "NUNOA",
+        "PEDRO AGUIRRE CERDA", "PENALOLEN", "PROVIDENCIA", "PUDAHUEL",
+        "QUILICURA", "QUINTA NORMAL", "RECOLETA", "RENCA", "SAN JOAQUIN",
+        "SAN MIGUEL", "SAN RAMON", "VITACURA", "PUENTE ALTO", "PIRQUE",
+        "SAN JOSE DE MAIPO", "COLINA", "LAMPA", "TILTIL", "SAN BERNARDO",
+        "BUIN", "CALERA DE TANGO", "PAINE", "MELIPILLA", "ALHUE", "CURACAVI",
+        "MARIA PINTO", "SAN PEDRO", "TALAGANTE", "EL MONTE", "ISLA DE MAIPO",
+        "PADRE HURTADO", "PENAFLOR",
+    ),
+    key=len,
+    reverse=True,  # la más larga primero ("SAN JOSE DE MAIPO" antes que otras)
+)
+
+_SIN_TILDES = str.maketrans("ÁÉÍÓÚÜÑáéíóúüñ", "AEIOUUNaeiouun")
+
+
 def _clean_direccion(direccion: str | None) -> str | None:
-    """Quita el punto final que el PDF agrega a algunas direcciones (no todas)
-    y que no aporta nada al usarlas como ubicación de un evento."""
+    """Deja solo la dirección: corta el texto residual que a veces viene pegado
+    al final (apellidos de árbitros desbordados desde la columna vecina) y
+    quita el punto final que el PDF agrega a algunas direcciones.
+
+    Tras la última coma viene la comuna: si es una comuna conocida se corta
+    justo después de ella; si no, se corta en el primer ". " (el PDF termina
+    la dirección con punto). Sin coma no hay cómo saber dónde termina, así que
+    se deja tal cual."""
     if direccion is None:
         return None
+    direccion = direccion.strip()
+    coma = direccion.rfind(",")
+    if coma != -1:
+        # Misma longitud que el original (una letra por letra), así que los
+        # índices sirven para cortar el texto original, con sus tildes.
+        resto = direccion[coma + 1:].upper().translate(_SIN_TILDES)
+        inicio = len(resto) - len(resto.lstrip())
+        comuna = next(
+            (c for c in COMUNAS_RM
+             if re.match(re.escape(c) + r"(?![A-Z0-9])", resto[inicio:])),
+            None,
+        )
+        if comuna:
+            direccion = direccion[: coma + 1 + inicio + len(comuna)]
+        else:
+            punto = direccion.find(". ", coma)
+            if punto != -1:
+                direccion = direccion[:punto]
     return direccion.rstrip(".")
 
 
@@ -252,6 +302,11 @@ def parse_pdf_text(text: str, team_name: str,
     # NEW_MATCH_LINE_RE), así que el primero encontrado en la línea es de la
     # columna 0, el segundo de la columna 1, etc.
     current_gyms: list[str] = []
+    # Posición (columna de carácter en la línea sin recortar) donde empieza
+    # cada gimnasio de current_gyms en el formato nuevo. Sirve para asociar
+    # cada "● dirección" con el gimnasio que tiene encima, porque no siempre
+    # vienen todas las direcciones de la fila ni en la misma línea.
+    current_gym_cols: list[int] = []
     # Dirección conocida por NOMBRE de gimnasio (no por columna): un mismo
     # gimnasio reaparece en varias filas/columnas y el PDF solo imprime su
     # dirección la primera vez, así que hay que recordarla.
@@ -323,18 +378,35 @@ def parse_pdf_text(text: str, team_name: str,
         new_gym_matches = list(NEW_GYM_LINE_RE.finditer(line))
         if new_gym_matches:
             current_gyms = [gm.group("gimnasio").strip() for gm in new_gym_matches]
+            current_gym_cols = [
+                gm.start() for gm in NEW_GYM_LINE_RE.finditer(raw_line)
+            ]
             continue
 
-        # ¿Línea de dirección, formato nuevo? "● dirección ● dirección". Se
-        # asocia por posición con el gimnasio de esa misma columna: si esa
-        # columna no trae dirección en esta fila (gimnasio ya mencionado
-        # antes), se conserva la última conocida.
-        new_address_matches = list(NEW_ADDRESS_LINE_RE.finditer(line))
+        # ¿Línea de dirección, formato nuevo? "● dirección ● dirección". Si
+        # trae una dirección por gimnasio, van en orden de columna. Si trae
+        # menos, cada una se asocia con el gimnasio cuyo "▣" queda más cerca
+        # del "●": una columna puede no traer dirección (gimnasio ya
+        # mencionado antes, se conserva la última conocida) o traerla en otra
+        # línea, ej. la de la derecha sola en la línea siguiente, o precedida
+        # del nombre del gimnasio izquierdo que no cupo en su línea
+        # ("PARAGUAY ... ● ...").
+        new_address_matches = list(NEW_ADDRESS_LINE_RE.finditer(raw_line))
         if new_address_matches:
+            por_orden = len(new_address_matches) >= len(current_gyms)
             for i, am in enumerate(new_address_matches):
-                if i < len(current_gyms):
-                    known_addresses[current_gyms[i]] = _clean_direccion(
-                        am.group("direccion").strip()
+                if por_orden:
+                    columna = i
+                elif current_gym_cols:
+                    columna = min(
+                        range(len(current_gym_cols)),
+                        key=lambda c: abs(current_gym_cols[c] - am.start()),
+                    )
+                else:
+                    columna = 0
+                if columna < len(current_gyms):
+                    known_addresses[current_gyms[columna]] = _clean_direccion(
+                        am.group("direccion")
                     )
             continue
 
