@@ -126,6 +126,13 @@ def main():
     lookback = config.get("fechas_lookback", 1)
     pdfs = get_latest_pdfs(config["source_url"], lookback=lookback)
 
+    # Nombres completos de rivales de partidos ya sincronizados: el PDF nuevo
+    # a veces trunca nombres largos con "…" y así se pueden completar.
+    equipos_conocidos = {
+        e for m in state["matches"].values()
+        for e in (m.get("equipo_local"), m.get("equipo_visita")) if e
+    }
+
     changed_pdfs = []
     for pdf in pdfs:
         prev_md5 = state["pdf_hashes"].get(pdf.filename)
@@ -169,7 +176,10 @@ def main():
             continue
 
         pdfs_parseados.append(pdf)
-        partidos = parse_pdf_text(texto, config["team_name"], jornada=str(pdf.fecha_num))
+        partidos = parse_pdf_text(
+            texto, config["team_name"], jornada=str(pdf.fecha_num),
+            equipos_conocidos=equipos_conocidos,
+        )
         log.info("%s: %d partido(s) de %s encontrados.", pdf.filename, len(partidos), config["team_name"])
         for p in partidos:
             partidos_actuales[p.clave] = p.to_dict()

@@ -109,6 +109,24 @@ def test_build_event_body_incluye_id_partido_en_extended_properties():
     assert body["extendedProperties"]["private"]["id_partido"] == "336"
 
 
+def test_build_event_body_incluye_cancha_si_viene():
+    sync, _ = _make_sync_with_mocked_service()
+
+    body = sync._build_event_body(_partido(cancha="14"), duration_minutes=80)
+
+    assert "Cancha: 14\n" in body["description"]
+
+
+def test_build_event_body_omite_cancha_si_no_viene():
+    # El formato nuevo del PDF (jornada 22 en adelante) no trae cancha.
+    sync, _ = _make_sync_with_mocked_service()
+
+    body = sync._build_event_body(_partido(cancha=None), duration_minutes=80)
+
+    assert "Cancha" not in body["description"]
+    assert "Categoría: SERIE 45" in body["description"]
+
+
 def test_find_event_id_by_partido_devuelve_id_si_existe():
     sync, service = _make_sync_with_mocked_service()
     service.events.return_value.list.return_value.execute.return_value = {

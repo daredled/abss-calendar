@@ -373,3 +373,67 @@ def test_formato_real_asocia_cada_direccion_con_el_gimnasio_de_su_columna(
     assert len(partidos) == 1
     assert partidos[0].gimnasio == gimnasio
     assert partidos[0].direccion == direccion
+
+
+# ---------------------------------------------------------------------------
+# Filas de partido del formato real que antes se perdían: grupos sin "Serie N"
+# ("G3 40 + 45") y equipos con nombre truncado con "…". Casos sacados de los
+# PDFs reales de las jornadas 22 a 24.
+# ---------------------------------------------------------------------------
+
+_FILAS_RARAS_LINEAS = [
+    "      SSÁÁBBAADDOO,, 0033 DDEE OOCCTTUUBBRREE DDEE 22002266",
+    "    ▣ GIMNASIO RECINTO UNO Árbitros:      ▣ GIMNASIO RECINTO DOS        Árbitros:      ",
+    "     ● CALLE UNO 100, MAIPU. ARBITRO ● CALLE DOS 200, RENCA. ARBITRO",
+    "   HORA    LOCAL      VISITA   SERIE - GRUPO HORA LOCAL      VISITA    SERIE - GRUPO",
+    # Truncado en la columna izquierda: antes arrastraba al partido de la derecha.
+    "    17:55 U.LA GRANJA 45… S.CEPPI 45-A G3 40 + 45 17:55 J.RAMSAY 60-A MADECO 60-A Serie 60 G2 (6to_10mo)",
+    "    19:15 S.CEPPI 40-A MADECO 40-A G3 40 + 45",
+    "    20:35 D.CENTENARIO … MI EQUIPO 45-A Serie 45 G1-Título",
+    "    21:55 MI EQUIPO 45-B BUFALO 45-A SERIE 45 21:55 U.LA GRANJA 45-A OTRO 45-A SERIE 45",
+]
+FILAS_RARAS_TEXTO = "\n".join(_FILAS_RARAS_LINEAS)
+
+
+def test_formato_real_grupo_sin_serie_toma_la_categoria_de_los_equipos():
+    partidos = parse_pdf_text(FILAS_RARAS_TEXTO, "S.CEPPI 40-A", jornada="24")
+    assert len(partidos) == 1
+    assert partidos[0].hora == "19:15"
+    assert partidos[0].equipo_visita == "MADECO 40-A"
+    assert partidos[0].categoria == "SERIE 40"
+
+
+def test_formato_real_partido_truncado_no_arrastra_al_de_la_otra_columna():
+    partidos = parse_pdf_text(FILAS_RARAS_TEXTO, "MADECO 60-A", jornada="24")
+    assert len(partidos) == 1
+    p = partidos[0]
+    assert p.equipo_local == "J.RAMSAY 60-A"
+    assert p.gimnasio == "RECINTO DOS"
+    assert p.direccion == "CALLE DOS 200, RENCA"
+
+
+def test_formato_real_truncado_se_completa_con_otra_fila_del_pdf():
+    # "U.LA GRANJA 45…" aparece completo más abajo ("U.LA GRANJA 45-A").
+    partidos = parse_pdf_text(FILAS_RARAS_TEXTO, "S.CEPPI 45-A", jornada="24")
+    assert len(partidos) == 1
+    assert partidos[0].equipo_local == "U.LA GRANJA 45-A"
+    assert partidos[0].categoria == "SERIE 45"
+    assert partidos[0].gimnasio == "RECINTO UNO"
+
+
+def test_formato_real_truncado_se_completa_con_equipos_conocidos():
+    partidos = parse_pdf_text(
+        FILAS_RARAS_TEXTO, "MI EQUIPO 45-A", jornada="24",
+        equipos_conocidos={"D.CENTENARIO 45-A", "D.CENTENARIO 60-A"},
+    )
+    assert len(partidos) == 1
+    assert partidos[0].equipo_local == "D.CENTENARIO 45-A"
+
+
+def test_formato_real_truncado_sin_candidato_unico_queda_tal_cual():
+    partidos = parse_pdf_text(
+        FILAS_RARAS_TEXTO, "MI EQUIPO 45-A", jornada="24",
+        equipos_conocidos={"D.CENTENARIO 45-A", "D.CENTENARIO 45-B"},
+    )
+    assert len(partidos) == 1
+    assert partidos[0].equipo_local == "D.CENTENARIO …"

@@ -58,17 +58,28 @@ MATCH_LINE_RE = re.compile(
 # línea de texto extraído, ej:
 #   "15:15 MADECO 50-A J.RAMSAY 50-A Serie 50 G2 (8vo_16avo) 15:15 LICEO 60-A BRISAS 60-A Serie 60 G2 (6to_10mo)"
 # Ya no trae "VS" entre equipos (se tolera igual, por si aparece), ni
-# árbitros/id/cancha en la fila. Sin anclas de inicio/fin: se usa con
-# finditer() para encontrar todas las ocurrencias de la fila (una por
-# columna) en lugar de un solo match por línea.
+# árbitros/id/cancha en la fila. La línea se corta primero en un segmento por
+# partido (uno por cada hora, ver MATCH_HORA_RE) y este patrón se aplica a
+# cada segmento: así un partido que no se entiende no arrastra al de la otra
+# columna.
+#
+# Variantes reales que hay que tolerar:
+# - Equipo con nombre largo truncado con "…", sin la categoría:
+#   "D.CENTENARIO …", "U.LA GRANJA 45…" (ver _resolver_truncados).
+# - Grupo sin "Serie N", solo "G3 40 + 45": la categoría sale entonces de la
+#   de los equipos (ver _categoria).
+_EQUIPO = r".+?(?:\s\d{2}-[A-Z]|…)"
 NEW_MATCH_LINE_RE = re.compile(
-    r"(?P<hora>\d{2}:\d{2})\s+"
-    r"(?P<local>.+?\s\d{2}-[A-Z])\s+"
+    r"^(?P<hora>\d{2}:\d{2})\s+"
+    rf"(?P<local>{_EQUIPO})\s+"
     r"(?:VS\s+)?"
-    r"(?P<visita>.+?\s\d{2}-[A-Z])\s+"
-    r"(?P<serie_label>SERIE|COMP)\s*(?P<serie_num>\d+)",
+    rf"(?P<visita>{_EQUIPO})\s+"
+    r"(?:(?P<serie_label>SERIE|COMP)\s*(?P<serie_num>\d+)|G\d+\s+\d+(?:\s*\+\s*\d+)+)",
     re.IGNORECASE,
 )
+
+# Inicio de cada partido dentro de una línea del formato nuevo (su hora).
+MATCH_HORA_RE = re.compile(r"(?<!\S)\d{2}:\d{2}(?=\s)")
 
 # Línea de gimnasio del formato nuevo, ej (dos columnas concatenadas):
 #   "▣ GIMNASIO ESC.LO FRANCO Árbitros:      ▣ GIMNASIO ESC.REPUBLICA DEL Árbitros:"
@@ -253,10 +264,53 @@ def _split_team_category(team_with_cat: str):
     return m.group("nombre").strip(), m.group("cat").strip()
 
 
+def _categoria(m) -> str:
+    """'SERIE 45' a partir del match de una fila. Si la fila no trae "Serie N"
+    (grupos mixtos como "G3 40 + 45"), se usa el número de categoría de los
+    equipos ("S.CEPPI 40-A" -> 'SERIE 40'), o de lo que quede de él en un
+    nombre truncado ("U.LA GRANJA 45…")."""
+    if m.group("serie_label"):
+        return f"{m.group('serie_label').upper()} {m.group('serie_num')}"
+    for equipo in (m.group("local"), m.group("visita")):
+        num = re.search(r"\s(\d{2})(?:-[A-Z]|…)$", equipo.strip())
+        if num:
+            return f"SERIE {num.group(1)}"
+    return ""
+
+
+def _resolver_truncados(partidos: list["Partido"], equipos_conocidos=()) -> None:
+    """Completa los nombres truncados con "…" ("D.CENTENARIO …",
+    "U.LA GRANJA 45…") con el nombre completo del mismo equipo si aparece en
+    otra fila del PDF o en `equipos_conocidos` (ej. rivales de fechas
+    anteriores): el único equipo de la misma serie cuyo nombre empieza igual.
+    Si no aparece, o hay más de un candidato, el nombre queda tal cual (sin
+    inventar una categoría que el PDF no trae)."""
+    completos = {
+        e for p in partidos for e in (p.equipo_local, p.equipo_visita)
+        if not e.endswith("…")
+    } | {e for e in equipos_conocidos if _split_team_category(e)[1]}
+
+    def resolver(equipo: str, categoria: str) -> str:
+        if not equipo.endswith("…"):
+            return equipo
+        prefijo = equipo.rstrip("…").strip()
+        num = categoria.rsplit(" ", 1)[-1]
+        candidatos = [
+            e for e in completos
+            if e.startswith(prefijo) and _split_team_category(e)[1].startswith(num + "-")
+        ]
+        return candidatos[0] if len(candidatos) == 1 else equipo
+
+    for p in partidos:
+        p.equipo_local = resolver(p.equipo_local, p.categoria)
+        p.equipo_visita = resolver(p.equipo_visita, p.categoria)
+
+
 def _build_partido(m, current_date, current_gym, current_address,
                    current_jornada, *, id_partido, cancha) -> Partido | None:
     """Construye un Partido a partir de un match de MATCH_LINE_RE o
-    NEW_MATCH_LINE_RE (comparten los grupos hora/local/visita/serie_*)."""
+    NEW_MATCH_LINE_RE (comparten los grupos hora/local/visita/serie_*; en el
+    nuevo serie_* puede venir vacío, ver _categoria)."""
     if not current_date:
         # No debería pasar si el PDF viene bien formado
         return None
@@ -272,23 +326,28 @@ def _build_partido(m, current_date, current_gym, current_address,
         direccion=current_address,
         equipo_local=f"{local_nombre} {local_cat}".strip(),
         equipo_visita=f"{visita_nombre} {visita_cat}".strip(),
-        categoria=f"{m.group('serie_label').upper()} {m.group('serie_num')}",
+        categoria=_categoria(m),
         cancha=cancha,
         jornada=current_jornada,
     )
 
 
 def parse_pdf_text(text: str, team_name: str,
-                   jornada: str | None = None) -> list[Partido]:
+                   jornada: str | None = None,
+                   equipos_conocidos=()) -> list[Partido]:
     """
     text: contenido de texto ya extraído del PDF (ej. via pdfplumber .extract_text())
     team_name: ej. "MI EQUIPO 45-A"  (nombre + categoría, tal como aparece en el PDF)
     jornada: número de jornada del PDF. El formato nuevo no trae id de partido,
         y este dato se usa para derivar una llave estable (ver Partido.clave).
         Si es None se intenta leer del encabezado ("... JORNADA 22").
+    equipos_conocidos: nombres completos ("EQUIPO 45-A") de otras fuentes,
+        para completar los que el PDF trae truncados con "…".
     """
     team_name_norm = team_name.strip().upper()
 
+    # Todos los partidos del PDF, no solo los del equipo: hacen falta para
+    # completar nombres truncados (ver _resolver_truncados). Se filtra al final.
     partidos = []
     current_date: date | None = None
     current_jornada: str | None = jornada
@@ -320,14 +379,14 @@ def parse_pdf_text(text: str, team_name: str,
 
     def agregar_partidos(matches, id_partido_de, cancha_de):
         for i, m in enumerate(matches):
+            if m is None:  # segmento que no se entendió; conserva su columna
+                continue
             gym, direccion = gimnasio_y_direccion(i)
             partido = _build_partido(
                 m, current_date, gym, direccion, current_jornada,
                 id_partido=id_partido_de(m), cancha=cancha_de(m),
             )
-            if partido and team_name_norm in (
-                partido.equipo_local.upper(), partido.equipo_visita.upper()
-            ):
+            if partido:
                 partidos.append(partido)
 
     for raw_line in text.splitlines():
@@ -437,10 +496,13 @@ def parse_pdf_text(text: str, team_name: str,
             continue
 
         # ¿Línea de partido(s), formato nuevo? Puede traer más de un partido
-        # concatenado (uno por columna); finditer() los saca todos en orden y
-        # cada uno se asocia con el gimnasio de su misma columna.
-        new_matches = list(NEW_MATCH_LINE_RE.finditer(line))
-        if new_matches:
+        # concatenado (uno por columna): se corta en un segmento por hora y
+        # cada partido reconocido se asocia con el gimnasio de su columna
+        # (por orden: el primer segmento es la columna 0, etc.).
+        horas = [h.start() for h in MATCH_HORA_RE.finditer(line)]
+        segmentos = [line[a:b].strip() for a, b in zip(horas, horas[1:] + [len(line)])]
+        new_matches = [NEW_MATCH_LINE_RE.match(seg) for seg in segmentos]
+        if any(new_matches):
             awaiting_address = False
             agregar_partidos(new_matches, id_partido_de=lambda m: None, cancha_de=lambda m: None)
             continue
@@ -451,7 +513,11 @@ def parse_pdf_text(text: str, team_name: str,
             awaiting_address = False
             continue
 
-    return partidos
+    _resolver_truncados(partidos, equipos_conocidos)
+    return [
+        p for p in partidos
+        if team_name_norm in (p.equipo_local.upper(), p.equipo_visita.upper())
+    ]
 
 
 def extract_text_from_pdf(path: str) -> str:

@@ -60,16 +60,17 @@ class CalendarSync:
         # sintética del formato nuevo (jornada 22 en adelante, que ya no trae
         # id de partido). Ver parse_pdf.Partido.clave.
         clave = partido.get("clave") or partido.get("id_partido") or ""
-        cancha = partido.get("cancha") or ""
+        # El formato nuevo del PDF ya no trae cancha: sin dato, no hay línea.
+        cancha = partido.get("cancha")
+        description = f"Partido ABSS - ID {clave}\n"
+        if cancha:
+            description += f"Cancha: {cancha}\n"
+        description += f"Categoría: {partido['categoria']}"
 
         return {
             "summary": f"{partido['equipo_local']} vs {partido['equipo_visita']} ({partido['categoria']})",
             "location": location,
-            "description": (
-                f"Partido ABSS - ID {clave}\n"
-                f"Cancha: {cancha}\n"
-                f"Categoría: {partido['categoria']}"
-            ),
+            "description": description,
             "start": {"dateTime": start_dt.isoformat(), "timeZone": self.timezone},
             "end": {"dateTime": end_dt.isoformat(), "timeZone": self.timezone},
             # Guardamos la clave en el propio evento (no solo en state.json)
