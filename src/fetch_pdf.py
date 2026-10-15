@@ -101,6 +101,13 @@ def download_pdf(url: str, fecha_num: int) -> PdfInfo:
     )
 
 
+def download_page(url: str) -> str:
+    """HTML de una página de la liga (ej. https://abss.cl/campeonato/, que se
+    usa de respaldo cuando el PDF viene escaneado, ver parse_web.py)."""
+    resp = _get_with_retries(url)
+    return resp.content.decode("utf-8", errors="replace")
+
+
 def get_latest_pdfs(source_url: str, lookback: int = 1) -> list[PdfInfo]:
     """
     Descarga las `lookback` fechas más recientes (por defecto solo la última).

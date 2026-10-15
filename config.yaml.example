@@ -4,6 +4,10 @@ team_name: "MI EQUIPO 45-A"
 # Página donde ABSS publica los links a los PDFs de programación
 source_url: "https://abss.cl/campeonato/todo.php"
 
+# (Opcional) Página con los próximos encuentros en texto. Se usa de respaldo
+# cuando el PDF de la última jornada viene escaneado (solo imagen).
+# web_url: "https://abss.cl/campeonato/"
+
 # Cuántos PDFs (fechas) recientes revisar en cada corrida.
 # 1 = solo el más reciente. 2 = el más reciente + el anterior (por si hay
 # reprogramaciones que afectan la fecha previa).

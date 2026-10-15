@@ -34,4 +34,4 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-py-modules = ["fetch_pdf", "parse_pdf", "sync_calendar", "main", "generar_nomina"]
+py-modules = ["fetch_pdf", "parse_pdf", "parse_web", "sync_calendar", "main", "generar_nomina"]

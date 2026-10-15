@@ -17,11 +17,13 @@ import json
 import logging
 import os
 import sys
+from datetime import date
 
 import yaml
 
-from fetch_pdf import get_latest_pdfs
+from fetch_pdf import download_page, get_latest_pdfs
 from parse_pdf import extract_text_from_pdf, parse_pdf_text
+from parse_web import parse_proximos_html
 from sync_calendar import CalendarSync
 
 # Los archivos de configuración/estado viven en la raíz del repo, un nivel
@@ -58,6 +60,10 @@ def save_state(state: dict) -> None:
 
 
 CAMPOS_CLAVE_CAMBIO = ("fecha", "hora", "gimnasio", "direccion")
+
+# Página con los próximos encuentros en texto: respaldo cuando el PDF de la
+# última jornada viene escaneado (ver parse_web.py).
+DEFAULT_WEB_URL = "https://abss.cl/campeonato/"
 
 
 def compute_diff(partidos_actuales: dict, known_matches: dict,
@@ -118,6 +124,68 @@ def scope_known_matches(known_matches: dict, changed_filenames: set) -> dict:
     }
 
 
+def direcciones_conocidas(known_matches: dict) -> dict:
+    """
+    Función pura: gimnasio -> dirección, tomada del partido más reciente de
+    cada gimnasio en el estado. La página de respaldo no trae direcciones.
+    """
+    direcciones = {}
+    for m in sorted(known_matches.values(), key=lambda m: m.get("fecha") or ""):
+        if m.get("gimnasio") and m.get("direccion"):
+            direcciones[m["gimnasio"]] = m["direccion"]
+    return direcciones
+
+
+def descartar_web_desactualizada(partidos_web: list, known_matches: dict,
+                                 jornada: str) -> tuple[list, list]:
+    """
+    Función pura: separa los partidos leídos de la página de respaldo en
+    (válidos, descartados).
+
+    La página no dice a qué jornada corresponde: se asume que es la del PDF
+    escaneado, pero si la página todavía no se actualizó mostraría partidos
+    de la jornada anterior, que con la llave de la nueva se duplicarían en el
+    calendario. Por eso se descarta todo partido que no sea posterior a los
+    partidos conocidos de otras jornadas.
+    """
+    ultima_fecha_previa = max(
+        (m["fecha"] for m in known_matches.values()
+         if m.get("fecha") and m.get("jornada") != jornada),
+        default="",
+    )
+    validos, descartados = [], []
+    for p in partidos_web:
+        (validos if p.fecha > ultima_fecha_previa else descartados).append(p)
+    return validos, descartados
+
+
+def leer_respaldo_web(config: dict, jornada: str, known_matches: dict) -> list:
+    """Partidos del equipo según la página de próximos encuentros, asumiendo
+    que son de `jornada`. Nunca levanta excepción: si algo falla, lo registra
+    y devuelve [] (el calendario queda como estaba)."""
+    url = config.get("web_url", DEFAULT_WEB_URL)
+    try:
+        html = download_page(url)
+    except Exception:
+        log.exception("No se pudo descargar la página de respaldo %s.", url)
+        return []
+
+    partidos = parse_proximos_html(
+        html, config["team_name"], jornada=jornada, hoy=date.today(),
+        direcciones_conocidas=direcciones_conocidas(known_matches),
+    )
+    validos, descartados = descartar_web_desactualizada(partidos, known_matches, jornada)
+    for p in descartados:
+        log.warning(
+            "Respaldo web: se descarta %s vs %s del %s; no es posterior a los "
+            "partidos de jornadas anteriores, la página parece desactualizada.",
+            p.equipo_local, p.equipo_visita, p.fecha,
+        )
+    log.info("Respaldo web (%s): %d partido(s) de %s para la jornada %s.",
+             url, len(validos), config["team_name"], jornada)
+    return validos
+
+
 def main():
     config = load_config()
     state = load_state()
@@ -157,6 +225,7 @@ def main():
     partidos_actuales = {}  # clave -> dict
     partido_pdf = {}  # clave -> filename del PDF de origen
     pdfs_parseados = []  # PDFs de los que sí se pudo extraer texto
+    pdfs_sin_texto = []  # PDFs escaneados: se intenta el respaldo web
     for pdf in changed_pdfs:
         with open(TMP_PDF_PATH, "wb") as f:
             f.write(pdf.content)
@@ -169,10 +238,11 @@ def main():
         if not texto.strip():
             log.warning(
                 "%s no tiene capa de texto (PDF escaneado / solo imagen). "
-                "No se puede parsear: se omite y NO se guarda su hash, para "
-                "reintentar en la próxima corrida.",
+                "No se puede parsear: NO se guarda su hash, para reintentar "
+                "en la próxima corrida.",
                 pdf.filename,
             )
+            pdfs_sin_texto.append(pdf)
             continue
 
         pdfs_parseados.append(pdf)
@@ -185,7 +255,25 @@ def main():
             partidos_actuales[p.clave] = p.to_dict()
             partido_pdf[p.clave] = pdf.filename
 
-    if not pdfs_parseados:
+    # Respaldo para PDFs escaneados: la página de próximos encuentros. Solo
+    # sirve para la última jornada publicada (la página no muestra las
+    # anteriores) y solo crea/actualiza: un partido que no aparece puede
+    # haberse jugado ya, así que nunca se borra nada a partir de ella. El
+    # hash del PDF tampoco se guarda, para volver a intentar con el PDF en la
+    # próxima corrida (por si lo republican con texto).
+    claves_web = set()
+    ultima_jornada = max(p.fecha_num for p in pdfs)
+    for pdf in pdfs_sin_texto:
+        if pdf.fecha_num != ultima_jornada:
+            log.warning("%s no es la última jornada: la página de próximos "
+                        "encuentros no sirve de respaldo, se omite.", pdf.filename)
+            continue
+        for p in leer_respaldo_web(config, str(pdf.fecha_num), state["matches"]):
+            partidos_actuales[p.clave] = p.to_dict()
+            partido_pdf[p.clave] = pdf.filename
+            claves_web.add(p.clave)
+
+    if not pdfs_parseados and not claves_web:
         log.warning("Ninguno de los PDFs cambiados se pudo parsear. Fin.")
         return
 
@@ -201,12 +289,6 @@ def main():
         save_state(state)
         return
 
-    sync = CalendarSync(
-        credentials_path=CREDENTIALS_PATH,
-        token_path=TOKEN_PATH,
-        calendar_id=config["google_calendar_id"],
-        timezone=config.get("timezone", "America/Santiago"),
-    )
     duration = config.get("event_duration_minutes", 80)
 
     known_matches = state["matches"]
@@ -225,8 +307,24 @@ def main():
     # pudieron parsear) quedan fuera del diff y no se tocan.
     changed_filenames = {pdf.filename for pdf in pdfs_parseados}
     known_matches_scoped = scope_known_matches(known_matches, changed_filenames)
+    # Los del respaldo web se comparan contra lo conocido (para actualizar en
+    # vez de duplicar), pero como siempre están en partidos_actuales nunca
+    # pueden salir como "borrados".
+    known_matches_scoped.update(
+        {c: known_matches[c] for c in claves_web if c in known_matches}
+    )
 
     diff = compute_diff(partidos_actuales, known_matches_scoped)
+
+    # Solo se conecta a Google si hay algo que cambiar: el respaldo web se
+    # relee en cada corrida mientras el PDF siga escaneado.
+    if diff["nuevos"] or diff["actualizados"] or diff["borrados"]:
+        sync = CalendarSync(
+            credentials_path=CREDENTIALS_PATH,
+            token_path=TOKEN_PATH,
+            calendar_id=config["google_calendar_id"],
+            timezone=config.get("timezone", "America/Santiago"),
+        )
 
     for clave in diff["nuevos"]:
         partido = partidos_actuales[clave]

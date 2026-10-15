@@ -20,8 +20,14 @@ detectando altas, cambios de horario/gimnasio y bajas.
 > **Nota sobre el formato del PDF:** ABSS cambió la plantilla de la
 > programación a partir de la jornada 22 (equipos separados por `VS`, árbitros
 > en línea aparte, sin ID de partido ni cancha). El parser entiende ambos
-> formatos. Si algún PDF se publica como imagen escaneada (sin capa de texto),
-> se registra un aviso y se omite sin tocar el calendario.
+> formatos. Si el PDF de la última jornada se publica como imagen escaneada
+> (sin capa de texto), los partidos se leen de respaldo desde la sección
+> "Próximos encuentros" de `https://abss.cl/campeonato/` (configurable con
+> `web_url`). Ese respaldo solo crea o actualiza eventos, nunca borra (la
+> página muestra solo partidos por jugar), y el hash del PDF no se guarda, para
+> volver a intentar con el PDF si lo republican con texto. Si el PDF escaneado
+> no es el de la última jornada, se registra un aviso y se omite sin tocar el
+> calendario.
 
 ## Requisitos
 
