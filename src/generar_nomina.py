@@ -53,13 +53,27 @@ def find_next_match(config: dict, now: datetime | None = None) -> Partido | None
         now = datetime.now()
 
     partidos_por_clave: dict[str, Partido] = {}
+    jornadas = []
+    jornadas_sin_texto = []
     for fecha_num, url in discover_pdf_urls(config["source_url"]):
+        jornadas.append(fecha_num)
         pdf = download_pdf(url, fecha_num)
         texto = extract_text_from_pdf_bytes(pdf.content)
         if not texto.strip():
-            # PDF escaneado / solo imagen: no se puede parsear, se omite.
+            # PDF escaneado / solo imagen: se intenta el respaldo web abajo.
+            jornadas_sin_texto.append(fecha_num)
             continue
         for partido in parse_pdf_text(texto, config["team_name"], jornada=str(fecha_num)):
+            partidos_por_clave[partido.clave] = partido
+
+    # Igual que en main(): la página de próximos encuentros solo sirve de
+    # respaldo para la última jornada publicada.
+    if jornadas and max(jornadas) in jornadas_sin_texto:
+        from main import leer_respaldo_web, load_state
+
+        known = load_state()["matches"]
+        known.update({c: p.to_dict() for c, p in partidos_por_clave.items()})
+        for partido in leer_respaldo_web(config, str(max(jornadas)), known):
             partidos_por_clave[partido.clave] = partido
 
     return pick_next_match(list(partidos_por_clave.values()), now)

@@ -111,3 +111,24 @@ def test_find_next_match_encuentra_el_partido_del_equipo_en_los_pdfs_vigentes():
     assert antes is not None
     assert antes.id_partido == "336"
     assert despues is None
+
+
+def test_find_next_match_usa_el_respaldo_web_si_la_ultima_jornada_viene_escaneada():
+    partido_web = Partido(
+        id_partido=None, fecha="2026-10-17", hora="17:55", gimnasio="PALMARES CENTRAL",
+        direccion=None, equipo_local="BRISAS 45-A", equipo_visita="MI EQUIPO 45-A",
+        categoria="SERIE 45", cancha=None, jornada="25",
+    )
+    urls = [(25, "https://fake/fecha25.pdf"), (14, "https://fake/fecha14.pdf")]
+    with patch("generar_nomina.discover_pdf_urls", return_value=urls), \
+         patch("generar_nomina.download_pdf") as mock_download, \
+         patch("generar_nomina.extract_text_from_pdf_bytes", side_effect=["", FECHA14_TEXTO]), \
+         patch("main.load_state", return_value={"matches": {}}), \
+         patch("main.leer_respaldo_web", return_value=[partido_web]) as mock_web:
+        mock_download.return_value.content = b"fake-pdf-bytes"
+        config = {"source_url": "https://abss.cl/campeonato/todo.php", "team_name": "MI EQUIPO 45-A"}
+
+        proximo = find_next_match(config, now=datetime(2026, 10, 15, 12, 0))
+
+    assert proximo == partido_web
+    assert mock_web.call_args.args[1] == "25"
